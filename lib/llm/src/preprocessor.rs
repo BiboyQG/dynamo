@@ -4994,6 +4994,8 @@ impl OpenAIPreprocessor {
         if let Some(family) = unified_parser::selected_family(
             self.tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),
+            request.inner.tool_choice.as_ref(),
+            guided_tool_constraint,
         ) {
             return Ok(ToolProcessingRoute::Unified(family));
         }
@@ -5162,7 +5164,16 @@ impl OpenAIPreprocessor {
                     stream,
                     tool_definitions,
                     guided_tool_constraint,
-                    unified_parser::stream_prefill(family, prompt_injected_reasoning),
+                    if *family == unified_parser::KIMI_K2_UNIFIED_FAMILY
+                        && Self::normalize_thinking_aliases(
+                            request,
+                            self.runtime_config.reasoning_parser.as_deref(),
+                        ) != Some(false)
+                    {
+                        dynamo_parsers_v2::UnifiedParserStartingState::Reasoning
+                    } else {
+                        unified_parser::stream_prefill(family, prompt_injected_reasoning)
+                    },
                     family,
                     guided_tool_streaming,
                     unified_parser::UnifiedRequestPolicy {
@@ -6084,6 +6095,7 @@ impl OpenAIPreprocessor {
                     inner,
                     nvext,
                     llm_metrics,
+                    tool_call_completion: Vec::new(),
                 }),
                 id: a.id,
                 event: a.event,
@@ -6214,6 +6226,7 @@ impl OpenAIPreprocessor {
                             inner,
                             nvext,
                             llm_metrics,
+                            tool_call_completion: Vec::new(),
                         }),
                         id: None,
                         event: None,
@@ -8895,6 +8908,7 @@ mod tests {
             },
             nvext: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         })
     }
 
