@@ -93,7 +93,7 @@ use crate::protocols::{
         },
     },
     openai::{
-        DeltaGeneratorExt,
+        DeltaGeneratorExt, ParsingOptions,
         chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
             scrub_synthetic_chunk_metadata,
@@ -1408,6 +1408,7 @@ static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
 
 pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
     "dynamo.llm.preserve_omitted_max_tokens";
+pub(crate) const REQUEST_PARSING_OPTIONS_CONTEXT_KEY: &str = "dynamo.llm.request_parsing_options";
 
 const EMBEDDING_ADD_SPECIAL_TOKENS_ENV: &str = "DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS";
 
@@ -7511,6 +7512,29 @@ impl
         )?;
         let tool_processing_route =
             self.tool_processing_route(&request, &guided_tool_constraint)?;
+        let payload_parsing_options = payload_handle.as_ref().map(|_| {
+            context
+                .get_optional::<ParsingOptions>(REQUEST_PARSING_OPTIONS_CONTEXT_KEY)
+                .ok()
+                .flatten()
+                .map(|options| options.as_ref().clone())
+                .unwrap_or_else(|| {
+                    let mut options = ParsingOptions::new(
+                        self.tool_call_parser.clone(),
+                        self.runtime_config.reasoning_parser.clone(),
+                    );
+                    options.tool_choice = request.inner.tool_choice.clone();
+                    options.guided_tool_constraint = guided_tool_constraint.clone();
+                    options.parallel_tool_calls = request.inner.parallel_tool_calls;
+                    options
+                        .with_tool_call_parsing_enabled(Self::tool_call_parsing_enabled(&request))
+                        .with_move_reasoning_to_content_when_empty(
+                            Self::wants_reasoning_as_content_when_empty(
+                                request.chat_template_args.as_ref(),
+                            ),
+                        )
+                })
+        });
         validate_legacy_jail_nvext_choice_count(
             request.inner.n.unwrap_or(1),
             request
@@ -7586,13 +7610,13 @@ impl
         // The payload branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,
         // while the non-payload branch boxes the impl Stream from postprocessor_parsing_stream.
         let final_stream = if let Some(payload) = payload_handle {
-            let (stream, agg_fut) = if payload.streaming() {
-                // Streaming: apply scan (pass-through + parallel aggregation)
-                crate::request_trace::payload_stream::scan_aggregate_with_future(transformed_stream)
-            } else {
-                // Non-streaming: apply fold (collect all, then emit single chunk)
-                crate::request_trace::payload_stream::fold_aggregate_with_future(transformed_stream)
-            };
+            let parsing_options = payload_parsing_options
+                .expect("payload capture has matching request parsing options");
+            let (stream, agg_fut) =
+                crate::request_trace::payload_stream::scan_aggregate_with_future(
+                    Box::pin(transformed_stream),
+                    parsing_options,
+                );
 
             // Spawn the payload emit off the request path. The outcome carries a drop
             // reason and any recovered partial response, so emit the record either way.
