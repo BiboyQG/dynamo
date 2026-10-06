@@ -4952,7 +4952,6 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
-                prompt_logprobs: None,
                 llm_metrics,
                 tool_call_completion: Vec::new(),
             };

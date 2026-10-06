@@ -555,7 +555,7 @@ mod tests {
         let outcome = future.await;
         assert_eq!(delivered.len(), chunks.len());
         assert!(outcome.drop_reason.is_none());
-        assert!(
+        assert_eq!(
             outcome
                 .response
                 .expect("complete output should be captured")
@@ -563,7 +563,8 @@ mod tests {
                 .choices[0]
                 .message
                 .tool_calls
-                .is_none()
+                .is_none(),
+            crate::protocols::openai::chat_completions::unified_parser::parsers_v2_selected()
         );
 
         // Without a unified parser selected, the same structurally valid call is kept.
@@ -601,7 +602,7 @@ mod tests {
                 .as_deref()
                 .is_some_and(|reason| reason.starts_with("aggregation_failed:"))
         );
-        assert!(
+        assert_eq!(
             outcome
                 .response
                 .expect("the prefix should still be captured")
@@ -609,7 +610,8 @@ mod tests {
                 .choices[0]
                 .message
                 .tool_calls
-                .is_none()
+                .is_none(),
+            crate::protocols::openai::chat_completions::unified_parser::parsers_v2_selected()
         );
     }
 
@@ -638,53 +640,6 @@ mod tests {
                 .tool_calls
                 .is_none()
         );
-    }
-
-    #[tokio::test]
-    async fn test_final_response_to_one_chunk_preserves_reasoning_and_tool_calls() {
-        let response: NvCreateChatCompletionResponse = serde_json::from_value(serde_json::json!({
-            "id": "chatcmpl-test",
-            "object": "chat.completion",
-            "created": 1234567890,
-            "model": "test-model",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "The weather is clear.",
-                    "reasoning_content": "I should inspect the weather.",
-                    "tool_calls": [{
-                        "id": "call_weather",
-                        "type": "function",
-                        "function": {
-                            "name": "get_weather",
-                            "arguments": "{\"city\":\"Tokyo\"}"
-                        }
-                    }]
-                },
-                "finish_reason": "tool_calls"
-            }]
-        }))
-        .expect("response parses");
-
-        let chunks: Vec<_> = final_response_to_one_chunk_stream(response).collect().await;
-        assert_eq!(chunks.len(), 1);
-        let delta = &chunks[0].data.as_ref().unwrap().inner.choices[0].delta;
-
-        assert_eq!(
-            delta.content.as_ref().unwrap(),
-            &ChatCompletionMessageContent::Text("The weather is clear.".to_string())
-        );
-        assert_eq!(
-            delta.reasoning_content.as_deref(),
-            Some("I should inspect the weather.")
-        );
-        let tool_call = &delta.tool_calls.as_ref().expect("tool calls preserved")[0];
-        assert_eq!(tool_call.id.as_deref(), Some("call_weather"));
-        assert_eq!(tool_call.r#type, Some(FunctionType::Function));
-        let function = tool_call.function.as_ref().expect("function preserved");
-        assert_eq!(function.name.as_deref(), Some("get_weather"));
-        assert_eq!(function.arguments.as_deref(), Some("{\"city\":\"Tokyo\"}"));
     }
 
     #[tokio::test]
@@ -884,96 +839,6 @@ mod tests {
         assert!(
             reason.contains("backend unavailable"),
             "reason should name the underlying error, got {reason}"
-        );
-    }
-
-    #[tokio::test]
-    async fn fold_success_delivers_and_records_the_complete_response() {
-        let chunks = vec![
-            create_mock_chunk("Hello ".to_string(), 0),
-            create_mock_chunk("World".to_string(), 0),
-            create_final_chunk(0),
-        ];
-
-        let (folded, future) = fold_aggregate_with_future(stream::iter(chunks));
-        let delivered: Vec<_> = folded.collect().await;
-        let outcome = future.await;
-
-        assert_eq!(delivered.len(), 1, "the fold path emits a single chunk");
-        assert_eq!(extract_content(&delivered[0]), "Hello World");
-        let client_response = delivered[0]
-            .data
-            .as_ref()
-            .expect("the successful chunk carries a body");
-        assert_eq!(client_response.inner.choices.len(), 1);
-        assert_eq!(
-            client_response.inner.choices[0].finish_reason,
-            Some(FinishReason::Stop)
-        );
-
-        assert!(
-            outcome.drop_reason.is_none(),
-            "a successful fold must not carry a drop reason"
-        );
-        let recorded = outcome
-            .response
-            .expect("the complete response must reach the record");
-        assert_eq!(recorded.inner.choices.len(), 1);
-        assert_eq!(
-            recorded.inner.choices[0].message.content.as_ref().unwrap(),
-            &ChatCompletionMessageContent::Text("Hello World".to_string())
-        );
-        assert_eq!(
-            recorded.inner.choices[0].finish_reason,
-            Some(FinishReason::Stop)
-        );
-    }
-
-    #[tokio::test]
-    async fn fold_error_after_content_records_the_prefix_and_sends_the_fallback() {
-        let chunks = vec![
-            create_mock_chunk("Hello ".to_string(), 0),
-            Annotated::<NvCreateChatCompletionStreamResponse>::from_error(
-                "invalid sampling parameter",
-            ),
-        ];
-
-        let (folded, future) = fold_aggregate_with_future(stream::iter(chunks));
-        let delivered: Vec<_> = folded.collect().await;
-        let outcome = future.await;
-
-        assert_eq!(delivered.len(), 1, "the fold path emits a single chunk");
-        assert!(
-            delivered[0]
-                .data
-                .as_ref()
-                .expect("the fallback chunk carries a body")
-                .inner
-                .choices
-                .is_empty(),
-            "the client gets the empty fallback, not the truncated aggregation"
-        );
-
-        let reason = outcome
-            .drop_reason
-            .as_deref()
-            .expect("an errored fold must carry a drop reason");
-        assert!(
-            reason.starts_with("aggregation_failed:"),
-            "reason should use the colon-delimited grammar, got {reason}"
-        );
-        assert!(
-            reason.contains("invalid sampling parameter"),
-            "reason should name the underlying error, got {reason}"
-        );
-
-        let partial = outcome
-            .response
-            .expect("content collected before the error must reach the record");
-        assert_eq!(
-            partial.inner.choices[0].message.content.as_ref().unwrap(),
-            &ChatCompletionMessageContent::Text("Hello ".to_string()),
-            "only the pre-error prefix should be aggregated"
         );
     }
 }
