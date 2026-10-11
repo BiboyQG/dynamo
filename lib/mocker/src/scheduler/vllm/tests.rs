@@ -4390,8 +4390,8 @@ mod fidelity {
 
     #[test]
     fn readmission_recompute_is_prefill_work() {
-        // The walkthrough scenario: R3 and R4 are preempted in passes 3 and 4
-        // and re-admitted in pass 9, R3 with 32 of its 34 tokens cached and
+        // The walkthrough scenario: R4 is preempted in pass 3 and R3 in pass 4; both are
+        // re-admitted in pass 9, R3 with 32 of its 34 tokens cached and
         // R4 with nothing cached.
         let args = MockEngineArgs::builder()
             .block_size(16)
@@ -4404,7 +4404,7 @@ mod fidelity {
             .speedup_ratio(0.0)
             .build()
             .unwrap();
-        let mut core = VllmCore::new(args);
+        let mut core = VllmCore::new(args.clone());
         core.receive(request(1, 0..126, 40));
         core.receive(request(2, 1000..1128, 8));
         core.receive(request(3, 2000..2032, 6));
@@ -4422,6 +4422,20 @@ mod fidelity {
         assert_eq!(fpm.sum_prefill_kv_tokens, 32);
         // R1 is the only decode.
         assert_eq!(fpm.num_decode_requests, 1);
+        // The pass is charged for two prefills with integer-mean ISL
+        // (34 + 17) / 2 = 25 and prefix (32 + 0) / 2 = 16 (before the fix: one
+        // prefill of 16 tokens), plus a decode over the 14 active blocks of
+        // R1 (134 tokens), R3 (34) and R4 (17), mean context 185 / 3.
+        let prefill_ms = args.perf_model.predict_prefill_time(2, 25, 16).unwrap();
+        let decode_ms = args
+            .perf_model
+            .predict_decode_time(3, 14 * 16, 185 / 3, 20 * 16)
+            .unwrap();
+        let pass_ms = pass_9.end_ms - passes[7].end_ms;
+        assert!(
+            (pass_ms - prefill_ms - decode_ms).abs() < 1e-6,
+            "pass 9 took {pass_ms} ms"
+        );
     }
 
     #[test]
@@ -4454,5 +4468,29 @@ mod fidelity {
         assert!(!core.state.requests.contains_key(&Uuid::from_u128(3)));
         assert!(core.state.waiting.contains(&Uuid::from_u128(2)));
         assert!(core.state.waiting.contains(&Uuid::from_u128(4)));
+    }
+
+    #[test]
+    fn cancelled_oversize_prompt_emits_no_signal_and_frees_its_id() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(6)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .max_model_len(Some(8))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let id = Uuid::from_u128(1);
+        core.receive(request(1, 0..8, 1));
+        core.apply_command(SchedulerCommand::CancelRequest { request_id: id })
+            .unwrap();
+        core.receive(request(1, 100..104, 1));
+        let pass = run(&mut core, &mut 0.0, 1).remove(0);
+        assert_eq!(admitted(&pass), vec![id]);
+        assert!(!pass.output_signals.iter().any(|s| s.rejected));
     }
 }

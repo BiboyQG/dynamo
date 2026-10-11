@@ -107,8 +107,9 @@ pub(super) struct PreemptedRequest {
 #[derive(Clone, Copy, Debug, Default)]
 struct ScheduledWork {
     total_tokens: usize,
-    /// Prefill work: new prompt tokens, or the recompute of more than one
-    /// token of a re-admitted request. A plain decode step is not prefill.
+    /// Prefill work, by vLLM's rule: the request had tokens below
+    /// `max(prompt_len, known_len - 1)` still to compute, so a resumed request
+    /// replaying its generated tokens is prefill until its last known token.
     prefill: bool,
     /// Tokens already in KV before this pass's work: the cached prefix of a
     /// new request, or everything computed so far of a resumed one.
@@ -1425,8 +1426,14 @@ impl VllmCore {
         self.state.compact_running();
         let mut rejected_uuids = std::mem::take(&mut self.model_len_rejects);
         for uuid in &rejected_uuids {
+            let request = self
+                .state
+                .requests
+                .get(uuid)
+                .expect("cancelled rejects are cleared");
             tracing::warn!(
                 %uuid,
+                prompt_tokens = request.sequence.num_input_tokens(),
                 max_model_len = self.args.max_model_len,
                 "rejecting request whose prompt reaches max_model_len"
             );
@@ -1508,6 +1515,8 @@ impl VllmCore {
                     .iter()
                     .filter_map(|running_uuid| self.state.requests.get(running_uuid))
                     .map(|request| &request.sequence);
+                // Destination requests enter waiting via ActivateDestination,
+                // not submit(), so the submit-time record does not cover them.
                 if policy::should_reject_for_model_len(
                     scheduling_policy,
                     &request.sequence,
@@ -1620,8 +1629,9 @@ impl VllmCore {
         let decode_start_ms = now_ms + prefill_time.as_secs_f64() * 1000.0;
         let (decode_time, mut output_signals) =
             self.emit_ready_tokens(collector, decode_start_ms)?;
-        // Emit the terminal signals for the requests the gate rejected above
-        // (see the gate comment for why this can't be done inline).
+        // Terminal signals for the requests rejected this pass (submit-time
+        // max_model_len records and the admission gate); emitted here because
+        // emit_ready_tokens builds the signal list.
         for uuid in rejected_uuids {
             output_signals.push(OutputSignal {
                 uuid,
@@ -1673,6 +1683,7 @@ impl VllmCore {
     }
 
     pub(super) fn drop_request(&mut self, uuid: Uuid) {
+        self.model_len_rejects.retain(|id| *id != uuid);
         let active_blocks_before = self.kv_manager.num_active_blocks();
         #[cfg(feature = "kvbm-offload")]
         {
@@ -1787,6 +1798,8 @@ impl VllmCore {
         scheduled: &FxHashMap<Uuid, ScheduledWork>,
         wall_time_secs: f64,
     ) -> ForwardPassSnapshot {
+        // Matches Dynamo's forward-pass metrics under vLLM's V2 model runner,
+        // where a resumed request counts as a prefill on the pass that replays it.
         let scheduled_prefills = scheduled.values().filter_map(|work| {
             work.prefill.then_some((
                 work.prompt_len as u64,
@@ -2021,16 +2034,17 @@ impl VllmCore {
             );
         }
 
-        let prompt_after = actual_computed_after.min(prompt_len);
-        // vLLM runs every scheduled token of a prefill chunk through the
-        // forward pass, generated tokens recomputed after a preemption included.
-        let prefill = prompt_after > prompt_before || tokens_used > 1;
         let sequence_len = self
             .state
             .requests
             .get(&uuid)
             .map(|r| r.sequence.len())
             .unwrap_or(0);
+        // vLLM treats every scheduled token below max(num_prompt_tokens,
+        // num_tokens - 1) as prefill, so a resumed request replaying its
+        // generated tokens is prefill until its last known token; only the
+        // step that computes that last token is a decode.
+        let prefill = effective_computed_before < prompt_len.max(sequence_len.saturating_sub(1));
         let terminal_after_schedule = self.state.requests.get(&uuid).is_some_and(|request| {
             policy::generation_complete(&request.sequence, self.args.max_model_len)
         });
