@@ -2606,6 +2606,7 @@ def run_mocker_trace_replay(
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
     scaling_policy: Optional[Any] = None,
+    waiting_policy: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2623,6 +2624,12 @@ def run_mocker_trace_replay(
     ``scaling_policy`` is an optional offline callback implementing
     ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
     policy in online mode raises ``ValueError``.
+
+    ``waiting_policy`` is an optional object with ``uses_prefix_hits: bool`` and
+    ``order(view: dict) -> list[int]`` (see ``dynamo.replay.waiting_policy``),
+    called once per scheduler pass to order the waiting queue. Offline
+    aggregated replay of a Mooncake trace without ``replay_concurrency`` only;
+    anything else raises ``ValueError``.
     """
     ...
 
@@ -2654,6 +2661,7 @@ def run_mocker_synthetic_trace_replay(
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
     scaling_policy: Optional[Any] = None,
+    waiting_policy: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file.
 
@@ -2664,6 +2672,9 @@ def run_mocker_synthetic_trace_replay(
     ``scaling_policy`` is an optional offline callback implementing
     ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
     policy in online mode raises ``ValueError``.
+
+    ``waiting_policy`` as in ``run_mocker_trace_replay``: offline aggregated
+    replay without ``replay_concurrency`` only.
     """
     ...
 
