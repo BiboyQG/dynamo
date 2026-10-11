@@ -4354,3 +4354,105 @@ mod offload {
         assert_eq!(core.destination_block_count(handoff_id), 2);
     }
 }
+
+mod fidelity {
+    use super::*;
+    use crate::replay::TraceCollector;
+    use crate::scheduler::EnginePassResult;
+
+    fn request(
+        uuid: u128,
+        tokens: std::ops::Range<u32>,
+        max_output_tokens: usize,
+    ) -> DirectRequest {
+        DirectRequest {
+            tokens: tokens.collect(),
+            max_output_tokens,
+            uuid: Some(Uuid::from_u128(uuid)),
+            ..Default::default()
+        }
+    }
+
+    fn run(core: &mut VllmCore, now_ms: &mut f64, passes: usize) -> Vec<EnginePassResult> {
+        let mut collector = TraceCollector::default();
+        (0..passes)
+            .map(|_| {
+                let pass = core.execute_pass(&mut collector, *now_ms);
+                *now_ms = pass.end_ms.max(*now_ms + 1.0);
+                pass
+            })
+            .collect()
+    }
+
+    fn admitted(pass: &EnginePassResult) -> Vec<Uuid> {
+        pass.admissions.iter().map(|a| a.uuid).collect()
+    }
+
+    #[test]
+    fn readmission_recompute_is_prefill_work() {
+        // The walkthrough scenario: R3 and R4 are preempted in passes 3 and 4
+        // and re-admitted in pass 9, R3 with 32 of its 34 tokens cached and
+        // R4 with nothing cached.
+        let args = MockEngineArgs::builder()
+            .block_size(16)
+            .num_gpu_blocks(20)
+            .max_num_batched_tokens(Some(254))
+            .max_num_seqs(Some(8))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .preemption_mode(PreemptionMode::Lifo)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        core.receive(request(1, 0..126, 40));
+        core.receive(request(2, 1000..1128, 8));
+        core.receive(request(3, 2000..2032, 6));
+        core.receive(request(4, 3000..3016, 2));
+        let passes = run(&mut core, &mut 0.0, 9);
+        let pass_9 = &passes[8];
+        assert_eq!(
+            admitted(pass_9),
+            vec![Uuid::from_u128(3), Uuid::from_u128(4)]
+        );
+        let fpm = pass_9.fpm.as_ref().unwrap();
+        // R3 recomputes 2 generated tokens over 32 cached; R4 recomputes all 17.
+        assert_eq!(fpm.num_prefill_requests, 2);
+        assert_eq!(fpm.sum_prefill_tokens, 19);
+        assert_eq!(fpm.sum_prefill_kv_tokens, 32);
+        // R1 is the only decode.
+        assert_eq!(fpm.num_decode_requests, 1);
+    }
+
+    #[test]
+    fn oversize_prompt_is_rejected_before_it_queues() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(6)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .max_model_len(Some(20))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        // The holder takes 4 of 6 blocks; the next request needs 3 and blocks
+        // the head; the oversize prompt sits behind it.
+        core.receive(request(1, 0..16, 4));
+        core.receive(request(2, 100..112, 1));
+        core.receive(request(3, 200..220, 1));
+        core.receive(request(4, 300..304, 1));
+        let pass = run(&mut core, &mut 0.0, 1).remove(0);
+        assert_eq!(admitted(&pass), vec![Uuid::from_u128(1)]);
+        assert!(
+            pass.output_signals
+                .iter()
+                .any(|s| s.uuid == Uuid::from_u128(3) && s.completed && s.rejected)
+        );
+        assert!(!core.state.requests.contains_key(&Uuid::from_u128(3)));
+        assert!(core.state.waiting.contains(&Uuid::from_u128(2)));
+        assert!(core.state.waiting.contains(&Uuid::from_u128(4)));
+    }
+}
