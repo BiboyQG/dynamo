@@ -3,17 +3,39 @@
 
 import json
 import os
+from contextlib import ExitStack
+from types import ModuleType
 
 from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
+from dynamo.replay.waiting_policy import ScoreOrder
+from dynamo.replay.waiting_policy import load as _load_waiting_policy
 
 
 def _normalize_trace_files(trace_files):
     if isinstance(trace_files, (str, os.PathLike)):
         return [trace_files]
     return list(trace_files)
+
+
+def _waiting_policy_adapter(stack, waiting_policy, log_path):
+    """``waiting_policy`` is a policy module or the path of one; the optional
+    decision log stays open for the replay."""
+    if waiting_policy is None:
+        if log_path is not None:
+            raise ValueError("waiting_policy_log needs waiting_policy")
+        return None
+    module = (
+        waiting_policy
+        if isinstance(waiting_policy, ModuleType)
+        else _load_waiting_policy(waiting_policy)
+    )
+    log = None
+    if log_path is not None:
+        log = stack.enter_context(open(log_path, "w", encoding="utf-8"))
+    return ScoreOrder(module, decision_log=log)
 
 
 def _planner_config_arg(planner_config):
@@ -51,8 +73,17 @@ def run_trace_replay(
     sla_e2e_ms=None,
     planner_config=None,
     benchmark_granularity=8,
+    waiting_policy=None,
+    waiting_policy_log=None,
 ):
     """Run trace replay.
+
+    ``waiting_policy`` (a policy module or its path, see
+    ``dynamo.replay.waiting_policy``) reorders each worker's waiting queue;
+    offline aggregated vLLM replay of a Mooncake trace only (not mooncake-delta
+    or agentic). The report then carries ``waiting_policy_stats``;
+    ``waiting_policy_log`` writes one JSON line per policy call. The log file is
+    opened before the replay starts, so a rejected call still truncates it.
 
     ``wall_time_ms`` and derived throughput measure Rust runtime construction
     and execution. Planner creation and bootstrap happen before that boundary.
@@ -108,27 +139,32 @@ def run_trace_replay(
                 "planner_config replay with trace_format='dynamo' "
                 "requires at least one trace file"
             )
-        from dynamo.replay.main import _planner_replay_adapter
+    with ExitStack() as stack:
+        waiting = _waiting_policy_adapter(stack, waiting_policy, waiting_policy_log)
+        adapter = None
+        if planner_config is not None:
+            from dynamo.replay.main import _planner_replay_adapter
 
-        adapter_scope = _planner_replay_adapter(
-            extra_engine_args=extra_engine_args,
-            prefill_engine_args=prefill_engine_args,
-            decode_engine_args=decode_engine_args,
-            planner_config_arg=_planner_config_arg(planner_config),
-            benchmark_granularity=benchmark_granularity,
-        )
-        with adapter_scope as adapter:
-            trace_report = _run_mocker_trace_replay(
-                trace_files,
-                **replay_kwargs,
-                scaling_policy=adapter,
+            adapter = stack.enter_context(
+                _planner_replay_adapter(
+                    extra_engine_args=extra_engine_args,
+                    prefill_engine_args=prefill_engine_args,
+                    decode_engine_args=decode_engine_args,
+                    planner_config_arg=_planner_config_arg(planner_config),
+                    benchmark_granularity=benchmark_granularity,
+                )
             )
+        trace_report = _run_mocker_trace_replay(
+            trace_files,
+            **replay_kwargs,
+            scaling_policy=adapter,
+            waiting_policy=waiting,
+        )
+        if waiting is not None:
+            trace_report["waiting_policy_stats"] = waiting.stats
+        if adapter is not None:
             return adapter.finalize(trace_report)
-    return _run_mocker_trace_replay(
-        trace_files,
-        **replay_kwargs,
-        scaling_policy=None,
-    )
+        return trace_report
 
 
 def run_synthetic_trace_replay(
@@ -161,8 +197,11 @@ def run_synthetic_trace_replay(
     sla_e2e_ms=None,
     planner_config=None,
     benchmark_granularity=8,
+    waiting_policy=None,
+    waiting_policy_log=None,
 ):
-    """Run synthetic replay with the same timing boundary as trace replay."""
+    """Run synthetic replay with the same timing boundary as trace replay.
+    ``waiting_policy`` as in :func:`run_trace_replay`."""
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
@@ -193,28 +232,31 @@ def run_synthetic_trace_replay(
             raise ValueError(
                 "planner_config replay only supports replay_mode='offline'"
             )
-        from dynamo.replay.main import _planner_replay_adapter
+    with ExitStack() as stack:
+        waiting = _waiting_policy_adapter(stack, waiting_policy, waiting_policy_log)
+        adapter = None
+        if planner_config is not None:
+            from dynamo.replay.main import _planner_replay_adapter
 
-        adapter_scope = _planner_replay_adapter(
-            extra_engine_args=extra_engine_args,
-            prefill_engine_args=prefill_engine_args,
-            decode_engine_args=decode_engine_args,
-            planner_config_arg=_planner_config_arg(planner_config),
-            benchmark_granularity=benchmark_granularity,
-        )
-        with adapter_scope as adapter:
-            trace_report = _run_mocker_synthetic_trace_replay(
-                input_tokens,
-                output_tokens,
-                request_count,
-                **replay_kwargs,
-                scaling_policy=adapter,
+            adapter = stack.enter_context(
+                _planner_replay_adapter(
+                    extra_engine_args=extra_engine_args,
+                    prefill_engine_args=prefill_engine_args,
+                    decode_engine_args=decode_engine_args,
+                    planner_config_arg=_planner_config_arg(planner_config),
+                    benchmark_granularity=benchmark_granularity,
+                )
             )
+        trace_report = _run_mocker_synthetic_trace_replay(
+            input_tokens,
+            output_tokens,
+            request_count,
+            **replay_kwargs,
+            scaling_policy=adapter,
+            waiting_policy=waiting,
+        )
+        if waiting is not None:
+            trace_report["waiting_policy_stats"] = waiting.stats
+        if adapter is not None:
             return adapter.finalize(trace_report)
-    return _run_mocker_synthetic_trace_replay(
-        input_tokens,
-        output_tokens,
-        request_count,
-        **replay_kwargs,
-        scaling_policy=None,
-    )
+        return trace_report

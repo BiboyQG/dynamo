@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use dynamo_mocker::common::perf_model::PerfModel;
 use dynamo_mocker::common::protocols::{
@@ -17,6 +17,7 @@ use dynamo_mocker::loadgen::{
 use dynamo_mocker::replay::{
     ReplayArgsMode, ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot,
 };
+use dynamo_mocker::scheduler::{WaitingPolicyHandle, WaitingQueuePolicy, WaitingQueueView};
 use pyo3::{
     exceptions::{PyException, PyValueError},
     prelude::*,
@@ -885,7 +886,7 @@ impl MockEngineArgs {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, scaling_policy=None))]
+#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, scaling_policy=None, waiting_policy=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -913,6 +914,7 @@ pub fn run_mocker_trace_replay(
     sla_itl_ms: Option<f64>,
     sla_e2e_ms: Option<f64>,
     scaling_policy: Option<Py<PyAny>>,
+    waiting_policy: Option<Py<PyAny>>,
 ) -> PyResult<PyObject> {
     let args_selection = load_replay_args_selection(
         py,
@@ -925,6 +927,28 @@ pub fn run_mocker_trace_replay(
     )?;
     let router_mode = parse_replay_router_mode(router_mode)?;
     let trace_format = parse_trace_file_format(trace_format)?;
+    if waiting_policy.is_some() {
+        if replay_mode != "offline" {
+            return Err(PyValueError::new_err(
+                "waiting_policy only supports replay_mode='offline'",
+            ));
+        }
+        if replay_concurrency.is_some() {
+            return Err(PyValueError::new_err(
+                "waiting_policy does not support replay_concurrency",
+            ));
+        }
+        if trace_format != dynamo_mocker::loadgen::TraceFileFormat::Mooncake {
+            return Err(PyValueError::new_err(
+                "waiting_policy only supports trace_format='mooncake'",
+            ));
+        }
+        if matches!(args_selection, ReplayArgsSelection::Disagg(_)) {
+            return Err(PyValueError::new_err(
+                "waiting_policy only supports aggregated replay",
+            ));
+        }
+    }
     dynamo_mocker::loadgen::validate_trace_files(trace_format, &trace_files).map_err(to_pyerr)?;
     let prefill_load_estimator = load_replay_prefill_load_estimator(
         py,
@@ -961,7 +985,8 @@ pub fn run_mocker_trace_replay(
         itl_ms: sla_itl_ms,
         e2e_ms: sla_e2e_ms,
     };
-    let run = move |mut scaling_policy: Option<Box<dyn ReplayScalingPolicy>>| {
+    let run = move |mut scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+                    mut waiting_policy: Option<WaitingPolicyHandle>| {
         let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
         if trace_format == dynamo_mocker::loadgen::TraceFileFormat::Dynamo {
             let trace =
@@ -1030,7 +1055,7 @@ pub fn run_mocker_trace_replay(
                     max_sim_time_ms,
                     sla,
                     scaling_policy.take(),
-                    None,
+                    waiting_policy.take(),
                 )
             }
             ReplayDispatch::AggregatedOnlineConcurrency(args, max_in_flight) => {
@@ -1105,10 +1130,17 @@ pub fn run_mocker_trace_replay(
             }
         }
     };
-    let report = if let Some(callback) = scaling_policy {
-        run(Some(Box::new(PyReplayScalingPolicy { callback }))).map_err(scaling_run_err_to_pyerr)?
+    let waiting_policy = waiting_policy
+        .map(|callback| PyWaitingQueuePolicy::handle(py, callback))
+        .transpose()?;
+    let report = if scaling_policy.is_none() && waiting_policy.is_none() {
+        py.allow_threads(move || run(None, None))
+            .map_err(to_pyerr)?
     } else {
-        py.allow_threads(move || run(None)).map_err(to_pyerr)?
+        let scaling_policy = scaling_policy.map(|callback| {
+            Box::new(PyReplayScalingPolicy { callback }) as Box<dyn ReplayScalingPolicy>
+        });
+        run(scaling_policy, waiting_policy).map_err(policy_run_err_to_pyerr)?
     };
     // Write per-request JSONL from Rust directly if requested, avoiding a
     // potentially-large round trip through pyo3 / pythonize. Each line is one
@@ -1300,7 +1332,7 @@ fn write_per_request_jsonl(
 }
 
 #[pyfunction]
-#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, scaling_policy=None))]
+#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, scaling_policy=None, waiting_policy=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_synthetic_trace_replay(
     py: Python<'_>,
@@ -1331,10 +1363,16 @@ pub fn run_mocker_synthetic_trace_replay(
     sla_itl_ms: Option<f64>,
     sla_e2e_ms: Option<f64>,
     scaling_policy: Option<Py<PyAny>>,
+    waiting_policy: Option<Py<PyAny>>,
 ) -> PyResult<PyObject> {
     if scaling_policy.is_some() && replay_mode != "offline" {
         return Err(PyValueError::new_err(
             "scaling_policy only supports replay_mode='offline'",
+        ));
+    }
+    if waiting_policy.is_some() && replay_mode != "offline" {
+        return Err(PyValueError::new_err(
+            "waiting_policy only supports replay_mode='offline'",
         ));
     }
     validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
@@ -1362,12 +1400,25 @@ pub fn run_mocker_synthetic_trace_replay(
         aic_perf_config,
     )?;
     let router_config = load_replay_router_config(router_config, model_name)?;
+    if waiting_policy.is_some() {
+        if replay_concurrency.is_some() {
+            return Err(PyValueError::new_err(
+                "waiting_policy does not support replay_concurrency",
+            ));
+        }
+        if matches!(args_selection, ReplayArgsSelection::Disagg(_)) {
+            return Err(PyValueError::new_err(
+                "waiting_policy only supports aggregated replay",
+            ));
+        }
+    }
     let replay_mode = replay_mode.to_owned();
     let block_size = match &args_selection {
         ReplayArgsSelection::Aggregated(args) => args.block_size.max(1),
         ReplayArgsSelection::Disagg(config) => config.prefill_args.block_size.max(1),
     };
-    let run = move |mut scaling_policy: Option<Box<dyn ReplayScalingPolicy>>| {
+    let run = move |mut scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+                    mut waiting_policy: Option<WaitingPolicyHandle>| {
         let load_controller =
             parse_synthetic_load_controller(replay_concurrency, request_rate, arrival_interval_ms)?;
         let replay_concurrency = load_controller.replay_concurrency();
@@ -1426,7 +1477,7 @@ pub fn run_mocker_synthetic_trace_replay(
                             None,
                             sla,
                             scaling_policy.take(),
-                            None,
+                            waiting_policy.take(),
                         )
                     }
                     ("online", Some(max_in_flight)) => {
@@ -1531,7 +1582,7 @@ pub fn run_mocker_synthetic_trace_replay(
                     router_mode,
                     sla,
                     scaling_policy.take(),
-                    None,
+                    waiting_policy.take(),
                 ),
                 ("online", Some(max_in_flight)) => {
                     dynamo_mocker::replay::simulate_concurrency_live_requests_with_router_mode_and_options(
@@ -1599,10 +1650,17 @@ pub fn run_mocker_synthetic_trace_replay(
             }
         }
     };
-    let report = if let Some(callback) = scaling_policy {
-        run(Some(Box::new(PyReplayScalingPolicy { callback }))).map_err(scaling_run_err_to_pyerr)?
+    let waiting_policy = waiting_policy
+        .map(|callback| PyWaitingQueuePolicy::handle(py, callback))
+        .transpose()?;
+    let report = if scaling_policy.is_none() && waiting_policy.is_none() {
+        py.allow_threads(move || run(None, None))
+            .map_err(to_pyerr)?
     } else {
-        py.allow_threads(move || run(None)).map_err(to_pyerr)?
+        let scaling_policy = scaling_policy.map(|callback| {
+            Box::new(PyReplayScalingPolicy { callback }) as Box<dyn ReplayScalingPolicy>
+        });
+        run(scaling_policy, waiting_policy).map_err(policy_run_err_to_pyerr)?
     };
     pythonize(py, &report)
         .map_err(to_pyerr)
@@ -2323,15 +2381,50 @@ fn validate_sla_threshold(name: &str, value: Option<f64>) -> PyResult<()> {
     Ok(())
 }
 
-/// Convert a scaling-run error back into a `PyErr`, preserving the original
+/// Convert a policy-run error back into a `PyErr`, preserving the original
 /// Python exception (its type and traceback) when the failure originated in a
-/// scaling callback (`initial_tick_ms` / `on_tick` stash the `PyErr` via
-/// `anyhow::Error::new`). Non-Python errors (e.g. a simulation dead-end) fall
-/// back to the generic conversion.
-fn scaling_run_err_to_pyerr(err: anyhow::Error) -> PyErr {
+/// Python callback (the scaling and waiting-queue adapters stash the `PyErr`
+/// via `anyhow::Error::new`). Non-Python errors (e.g. a simulation dead-end)
+/// fall back to the generic conversion.
+fn policy_run_err_to_pyerr(err: anyhow::Error) -> PyErr {
     match err.downcast::<PyErr>() {
         Ok(py_err) => py_err,
         Err(other) => to_pyerr(other),
+    }
+}
+
+/// Adapts a Python object with `uses_prefix_hits` and `order(view) -> list[int]`
+/// to [`WaitingQueuePolicy`]. The replay call keeps the GIL while a Python
+/// policy is installed, so each pass is a cheap re-entry.
+struct PyWaitingQueuePolicy {
+    callback: Py<PyAny>,
+    uses_prefix_hits: bool,
+}
+
+impl PyWaitingQueuePolicy {
+    fn handle(py: Python<'_>, callback: Py<PyAny>) -> PyResult<WaitingPolicyHandle> {
+        let uses_prefix_hits = callback.bind(py).getattr("uses_prefix_hits")?.extract()?;
+        Ok(Arc::new(Mutex::new(Self {
+            callback,
+            uses_prefix_hits,
+        })))
+    }
+}
+
+impl WaitingQueuePolicy for PyWaitingQueuePolicy {
+    fn uses_prefix_hits(&self) -> bool {
+        self.uses_prefix_hits
+    }
+
+    fn order(&mut self, view: &WaitingQueueView) -> anyhow::Result<Vec<usize>> {
+        Python::with_gil(|py| {
+            let view = pythonize(py, view).map_err(to_pyerr)?;
+            self.callback
+                .bind(py)
+                .call_method1("order", (view,))?
+                .extract()
+        })
+        .map_err(anyhow::Error::new)
     }
 }
 
