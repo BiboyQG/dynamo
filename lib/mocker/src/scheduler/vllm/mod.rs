@@ -13,7 +13,9 @@ mod waiting_policy;
 
 pub(crate) use core::VllmCore;
 pub use live::{MockerMetrics, Scheduler};
-pub(crate) use waiting_policy::WaitingPolicyHandle;
+pub use waiting_policy::{
+    WaitingPolicyHandle, WaitingQueuePolicy, WaitingQueueView, WaitingRequestView,
+};
 
 /// Re-exported for policy tests that assert on request status through
 /// [`VllmCore::state`]; only needed in test builds.

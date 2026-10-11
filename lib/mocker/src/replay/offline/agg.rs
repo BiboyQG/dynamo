@@ -39,6 +39,7 @@ use crate::loadgen::{ReplayRequestPayload, WorkloadDriver};
 #[cfg(test)]
 use crate::replay::ReplayRouterMode;
 use crate::replay::{ReplayTerminalStatus, TraceCollector};
+use crate::scheduler::WaitingPolicyHandle;
 use anyhow::bail;
 use rustc_hash::FxHashMap;
 #[cfg(test)]
@@ -275,6 +276,18 @@ where
         }
         self.scaling_policy = Some(policy);
         self
+    }
+
+    /// `None` keeps the native order. Takes the option so each runtime
+    /// construction site is one builder call instead of a match.
+    pub(in crate::replay) fn with_waiting_policy(
+        mut self,
+        policy: Option<WaitingPolicyHandle>,
+    ) -> anyhow::Result<Self> {
+        if let Some(policy) = policy {
+            self.engine.install_waiting_policy(policy)?;
+        }
+        Ok(self)
     }
 
     #[cfg(test)]

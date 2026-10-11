@@ -1030,6 +1030,7 @@ pub fn run_mocker_trace_replay(
                     max_sim_time_ms,
                     sla,
                     scaling_policy.take(),
+                    None,
                 )
             }
             ReplayDispatch::AggregatedOnlineConcurrency(args, max_in_flight) => {
@@ -1425,6 +1426,7 @@ pub fn run_mocker_synthetic_trace_replay(
                             None,
                             sla,
                             scaling_policy.take(),
+                            None,
                         )
                     }
                     ("online", Some(max_in_flight)) => {
@@ -1529,6 +1531,7 @@ pub fn run_mocker_synthetic_trace_replay(
                     router_mode,
                     sla,
                     scaling_policy.take(),
+                    None,
                 ),
                 ("online", Some(max_in_flight)) => {
                     dynamo_mocker::replay::simulate_concurrency_live_requests_with_router_mode_and_options(

@@ -31,3 +31,5 @@ pub(crate) use entrypoints::{
 
 #[cfg(test)]
 mod firewall_tests;
+#[cfg(test)]
+mod waiting_policy_tests;

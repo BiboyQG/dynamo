@@ -12,7 +12,7 @@ use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
 use crate::replay::TraceCollector;
 use crate::scheduler::{
     EngineCore, EnginePassResult, SchedulerCommand, SchedulerCommandEffects,
-    SchedulerCommandResult, SchedulerLifecycleEvent,
+    SchedulerCommandResult, SchedulerLifecycleEvent, WaitingPolicyHandle,
 };
 use uuid::Uuid;
 
@@ -416,6 +416,13 @@ impl OfflineWorkerState {
 
     pub(in crate::replay) fn engine_core(&self) -> &EngineCore {
         &self.core
+    }
+
+    pub(in crate::replay) fn set_waiting_policy(
+        &mut self,
+        policy: WaitingPolicyHandle,
+    ) -> Result<()> {
+        self.core.set_waiting_policy(policy)
     }
 
     fn increment_in_flight(&mut self) {
