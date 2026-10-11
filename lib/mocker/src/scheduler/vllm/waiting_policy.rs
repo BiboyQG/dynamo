@@ -16,7 +16,7 @@ use serde::Serialize;
 /// One live waiting request, as the policy sees it. Sequence lengths and
 /// prefix hits are in tokens; KV capacity is in blocks.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct WaitingRequestView {
+pub struct WaitingRequestView {
     /// Position among the live waiting requests in native order.
     pub queue_index: usize,
     /// Arrival order at this scheduler; the tie key.
@@ -40,7 +40,7 @@ pub(crate) struct WaitingRequestView {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct WaitingQueueView {
+pub struct WaitingQueueView {
     pub now_ms: f64,
     /// Opaque key, one per scheduler instance.
     pub worker_id: u64,
@@ -55,7 +55,7 @@ pub(crate) struct WaitingQueueView {
     pub requests: Vec<WaitingRequestView>,
 }
 
-pub(crate) trait WaitingQueuePolicy: Send {
+pub trait WaitingQueuePolicy: Send {
     /// Whether the view must carry the prefix fields. A policy that needs them
     /// is skipped on queues deeper than [`PREFIX_HITS_WAITING_CAP`].
     fn uses_prefix_hits(&self) -> bool;
@@ -67,11 +67,11 @@ pub(crate) trait WaitingQueuePolicy: Send {
 
 /// One policy object serves every worker of a replay; the replay is
 /// single-threaded, so the lock never contends.
-pub(crate) type WaitingPolicyHandle = Arc<Mutex<dyn WaitingQueuePolicy>>;
+pub type WaitingPolicyHandle = Arc<Mutex<dyn WaitingQueuePolicy>>;
 
 /// A prefix-aware policy is not called when more requests are waiting: the
 /// prefix probe costs O(hit blocks) per request in a real engine.
-pub(crate) const PREFIX_HITS_WAITING_CAP: usize = 128;
+pub const PREFIX_HITS_WAITING_CAP: usize = 128;
 
 pub(super) fn validate_order(order: &[usize], n: usize) -> anyhow::Result<()> {
     anyhow::ensure!(

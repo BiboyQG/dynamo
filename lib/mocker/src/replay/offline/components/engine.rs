@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use anyhow::bail;
 use smallvec::SmallVec;
@@ -21,7 +22,9 @@ use super::{
 };
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs};
 use crate::replay::TraceCollector;
-use crate::scheduler::{EnginePassResult, RouterEventVisibility, SchedulerCommand};
+use crate::scheduler::{
+    EnginePassResult, RouterEventVisibility, SchedulerCommand, WaitingPolicyHandle,
+};
 
 fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
     snapshot.num_prefill_requests > 0 || snapshot.num_decode_requests > 0
@@ -57,6 +60,8 @@ where
     args: MockEngineArgs,
     /// Whether dynamically added workers capture raw engine/router events.
     capture_raw: bool,
+    /// Installed on every scheduler, including those added during scale-up.
+    waiting_policy: Option<WaitingPolicyHandle>,
     observation: PhantomData<Observation>,
 }
 
@@ -91,6 +96,7 @@ where
             pending_startup: BTreeSet::new(),
             args: MockEngineArgs::default(),
             capture_raw: Observation::CAPTURE_RAW,
+            waiting_policy: None,
             observation: PhantomData,
         };
         component.refresh_all_groups();
@@ -137,6 +143,7 @@ where
             pending_startup: BTreeSet::new(),
             args,
             capture_raw: Observation::CAPTURE_RAW,
+            waiting_policy: None,
             observation: PhantomData,
         };
         component.refresh_all_groups();
@@ -151,6 +158,18 @@ where
     ) {
         self.args = args;
         self.capture_raw = capture_raw;
+    }
+
+    /// Install on every live scheduler; `add_worker` covers the ones created later.
+    pub(in crate::replay::offline) fn install_waiting_policy(
+        &mut self,
+        policy: WaitingPolicyHandle,
+    ) -> anyhow::Result<()> {
+        for worker in self.workers.iter_mut().flatten() {
+            worker.set_waiting_policy(Arc::clone(&policy))?;
+        }
+        self.waiting_policy = Some(policy);
+        Ok(())
     }
 
     fn worker(&self, rank_id: usize) -> Option<&OfflineWorkerState> {
@@ -239,13 +258,18 @@ where
         let mut rank_ids = Vec::with_capacity(self.args.dp_size.max(1) as usize);
         for dp_rank in 0..self.args.dp_size.max(1) {
             let rank_id = self.workers.len();
-            let worker = OfflineWorkerState::new_with_rank(
+            let mut worker = OfflineWorkerState::new_with_rank(
                 rank_id,
                 worker_id as u64,
                 dp_rank,
                 self.args.clone(),
                 self.capture_raw,
             );
+            if let Some(policy) = &self.waiting_policy {
+                worker
+                    .set_waiting_policy(Arc::clone(policy))
+                    .expect("same engine args as the schedulers the policy was installed on");
+            }
             debug_assert_eq!(rank_id, self.workers.len());
             self.workers.push(Some(worker));
             rank_ids.push(rank_id);

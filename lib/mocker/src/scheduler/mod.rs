@@ -147,8 +147,10 @@ pub(crate) fn accept_length_sample(output_signals: &[OutputSignal]) -> (usize, u
 pub(crate) use sglang::SglangCore;
 pub use sglang::SglangScheduler;
 pub(crate) use vllm::VllmCore;
-pub(crate) use vllm::WaitingPolicyHandle;
-pub use vllm::{MockerMetrics, Scheduler};
+pub use vllm::{
+    MockerMetrics, Scheduler, WaitingPolicyHandle, WaitingQueuePolicy, WaitingQueueView,
+    WaitingRequestView,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct AdmissionEvent {
@@ -229,8 +231,6 @@ impl EngineCore {
         }
     }
 
-    // The offline replay runtime (PR2) installs it; until then only tests call it.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn set_waiting_policy(&mut self, policy: WaitingPolicyHandle) -> anyhow::Result<()> {
         match self {
             Self::Vllm(core) => core.set_waiting_policy(policy),

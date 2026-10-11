@@ -18,7 +18,7 @@ use super::{
 };
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat};
-use crate::scheduler::RouterEventVisibility;
+use crate::scheduler::{RouterEventVisibility, WaitingPolicyHandle};
 
 /// Replay artifact KV-event timestamp visibility override.
 ///
@@ -192,6 +192,7 @@ pub fn simulate_loaded_trace_with_router_mode_and_options_and_scaling_policy(
             max_sim_time_ms,
             sla,
             scaling_policy,
+            None,
         )
     } else {
         crate::replay::offline::simulate_trace_workload_with_scaling_policy(
@@ -206,6 +207,7 @@ pub fn simulate_loaded_trace_with_router_mode_and_options_and_scaling_policy(
             max_sim_time_ms,
             sla,
             scaling_policy,
+            None,
         )
     }
 }
@@ -444,6 +446,7 @@ pub fn simulate_trace_file_with_router_mode_and_format(
         max_sim_time_ms,
         sla,
         None,
+        None,
     )
 }
 
@@ -465,6 +468,7 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
+    waiting_policy: Option<WaitingPolicyHandle>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_replay_args(&args, num_workers, router_mode, scaling_policy.is_some())?;
@@ -472,6 +476,10 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
         anyhow::ensure!(
             scaling_policy.is_none(),
             "scaling_policy replay only supports standard Mooncake traces"
+        );
+        anyhow::ensure!(
+            waiting_policy.is_none(),
+            "waiting_policy replay only supports standard Mooncake traces"
         );
         let trace =
             load_agentic_trace_from_file(trace_path, trace_block_size, arrival_speedup_ratio)?;
@@ -492,6 +500,9 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
     }
     if trace_accumulates_session_deltas(trace_format) && scaling_policy.is_some() {
         bail!("scaling_policy replay does not support mooncake-delta traces");
+    }
+    if trace_accumulates_session_deltas(trace_format) && waiting_policy.is_some() {
+        bail!("waiting_policy replay does not support mooncake-delta traces");
     }
     let trace = load_trace_from_file(
         trace_path,
@@ -515,6 +526,7 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
             max_sim_time_ms,
             sla,
             scaling_policy,
+            waiting_policy,
         )?
     } else if trace_accumulates_session_deltas(trace_format) {
         crate::replay::offline::simulate_trace_workload_accumulating_deltas(
@@ -541,6 +553,7 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
             max_sim_time_ms,
             sla,
             scaling_policy,
+            waiting_policy,
         )?
     };
     Ok(report)
@@ -856,6 +869,7 @@ pub fn simulate_trace_requests_with_router_mode(
         router_mode,
         sla,
         None,
+        None,
     )
 }
 
@@ -871,6 +885,7 @@ pub fn simulate_trace_requests_with_router_mode_and_scaling_policy(
     router_mode: ReplayRouterMode,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
+    waiting_policy: Option<WaitingPolicyHandle>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_replay_args(&args, num_workers, router_mode, scaling_policy.is_some())?;
@@ -890,6 +905,7 @@ pub fn simulate_trace_requests_with_router_mode_and_scaling_policy(
         None,
         sla,
         scaling_policy,
+        waiting_policy,
     )?;
     Ok(report)
 }
@@ -1672,6 +1688,7 @@ fn simulate_trace_workload_with_router_mode_and_options(
         max_sim_time_ms,
         sla,
         None,
+        None,
     )
 }
 
@@ -1688,6 +1705,7 @@ pub fn simulate_trace_workload_with_router_mode_and_options_and_scaling_policy(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
+    waiting_policy: Option<WaitingPolicyHandle>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_replay_args(&args, num_workers, router_mode, scaling_policy.is_some())?;
@@ -1703,6 +1721,7 @@ pub fn simulate_trace_workload_with_router_mode_and_options_and_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        waiting_policy,
     )?;
     Ok(report)
 }
