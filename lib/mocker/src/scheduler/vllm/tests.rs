@@ -4850,6 +4850,32 @@ mod waiting_policy {
         run(&mut core, &mut now_ms, 1);
         assert_eq!(*calls.lock().unwrap(), 0);
 
+        // A running prefill that takes the whole budget: no admission, no call.
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(32)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        core.receive(request(1, 0..48, 2));
+        core.receive(request(2, 100..104, 1));
+        core.receive(request(3, 200..204, 1));
+        let calls = install(&mut core, true, identity);
+        let mut now_ms = 0.0;
+        let mut calls_per_pass = Vec::new();
+        for _ in 0..4 {
+            run(&mut core, &mut now_ms, 1);
+            calls_per_pass.push(*calls.lock().unwrap());
+        }
+        // Pass 1 orders three requests and admits the 48-token prompt; its
+        // next two chunks use up the budget; pass 4 decodes and has room.
+        assert_eq!(calls_per_pass, vec![1, 1, 1, 2]);
+
         // The pass that preempts does not consult the policy; the next one does.
         let mut core = VllmCore::new(small_args(2));
         core.receive(request(1, 0..8, 8));

@@ -1560,9 +1560,10 @@ impl VllmCore {
         let max_num_running = self.args.max_num_seqs.unwrap_or(usize::MAX);
         let scheduling_policy = self.args.scheduling_policy();
         let admission = AdmissionInvariant::new(self.pending_destinations.has_pending());
-        let pass_order = self.waiting_policy_order(now_ms, max_num_running, preempted_any)?;
+        let pass_order =
+            self.waiting_policy_order(now_ms, max_num_running, preempted_any, token_budget)?;
         let mut order_cursor = 0usize;
-        while !preempted_any && self.state.running.len() < max_num_running {
+        while !preempted_any && token_budget > 0 && self.state.running.len() < max_num_running {
             let prefer_materialized = matches!(
                 admission.stage_for(false),
                 AdmissionStage::PendingDestinationHead
@@ -1770,6 +1771,7 @@ impl VllmCore {
         now_ms: f64,
         max_num_running: usize,
         preempted_any: bool,
+        token_budget: usize,
     ) -> anyhow::Result<Option<Vec<Uuid>>> {
         let Some(handle) = &self.waiting_policy else {
             return Ok(None);
@@ -1792,7 +1794,11 @@ impl VllmCore {
         // Pending destinations exist only on disaggregated decode workers,
         // which `set_waiting_policy` refuses.
         debug_assert!(!self.pending_destinations.has_pending());
-        if preempted_any || self.state.running.len() >= max_num_running || live.len() < 2 {
+        if preempted_any
+            || token_budget == 0
+            || self.state.running.len() >= max_num_running
+            || live.len() < 2
+        {
             return Ok(None);
         }
         let mut waiting_policy = handle.lock().expect("waiting policy lock");
