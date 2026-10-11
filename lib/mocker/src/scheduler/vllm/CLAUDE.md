@@ -20,8 +20,12 @@ TRT-LLM. `EngineType::Trtllm` uses the same `VllmCore` with a different
 - Do not recreate a separate TRT-LLM scheduler or scatter `EngineType` checks
   through `core.rs`; extend `SchedulingPolicy` and `policy.rs`.
 - Compute prefix cost once per waiting candidate and pass it through the
-  admission path.
+  admission path. The waiting-policy view takes a pass-start snapshot of each
+  candidate's cost; admission recomputes it because earlier admissions in the
+  same pass change the active blocks.
 - Discount only active cached prefix blocks from physical capacity. Inactive
   cached blocks must consume capacity when reactivated.
-- Preserve FIFO waiting behavior. A candidate that cannot be admitted now must
-  remain queued without preempting running work.
+- The waiting queue is FIFO unless a `WaitingQueuePolicy` is installed; the
+  policy only chooses the order in which a pass tries candidates. A candidate
+  that cannot be admitted now must remain queued without preempting running
+  work, and the policy's order is never written back to the queue.

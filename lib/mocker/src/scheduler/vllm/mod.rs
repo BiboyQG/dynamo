@@ -9,9 +9,11 @@
 mod core;
 mod live;
 mod policy;
+mod waiting_policy;
 
 pub(crate) use core::VllmCore;
 pub use live::{MockerMetrics, Scheduler};
+pub(crate) use waiting_policy::WaitingPolicyHandle;
 
 /// Re-exported for policy tests that assert on request status through
 /// [`VllmCore::state`]; only needed in test builds.

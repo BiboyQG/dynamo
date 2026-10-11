@@ -26,6 +26,10 @@ use crate::kv_manager::{DestinationReservation, G1Acquire, OffloadDependency};
 use crate::kvbm_offload::coordinator::SwapInTerminal;
 use crate::replay::TraceCollector;
 use crate::scheduler::vllm::policy::{self, AdmissionDecision};
+use crate::scheduler::vllm::waiting_policy::{
+    PREFIX_HITS_WAITING_CAP, WaitingPolicyHandle, WaitingQueueView, WaitingRequestView,
+    validate_order,
+};
 use crate::scheduler::{
     ActiveHandoffRequests, AdmissionEvent, AdmissionInvariant, AdmissionStage,
     CapturedRouterEventBuffer, DestinationHolds, EnginePassResult, ForwardPassSnapshot,
@@ -48,6 +52,13 @@ pub(crate) struct VllmRequestState {
     pub(crate) num_computed_tokens: usize,
     pub(crate) num_preemptions: usize,
     pub(crate) offload_dependency: Option<OffloadDependency>,
+    /// Arrival order at this scheduler; the waiting policy's tie key.
+    pub(crate) submit_seq: u64,
+    /// Virtual time of the first pass that saw this request waiting. Stamped
+    /// only while a waiting policy is installed.
+    pub(crate) first_seen_ms: Option<f64>,
+    /// `SchedulerState::processed_tokens` when the request entered the queue.
+    pub(crate) enqueued_at_tokens: u64,
 }
 
 impl VllmRequestState {
@@ -97,6 +108,9 @@ pub(crate) struct SchedulerState {
     running_members: FxHashSet<Uuid>,
     pub(crate) requests: FxHashMap<Uuid, VllmRequestState>,
     pub(crate) preemptions_total: u64,
+    submit_counter: u64,
+    /// Tokens scheduled by every pass so far; the clock behind `age_tokens`.
+    processed_tokens: u64,
 }
 
 pub(super) struct PreemptedRequest {
@@ -153,10 +167,33 @@ impl SchedulerState {
         self.waiting.push_back(uuid);
     }
 
-    fn insert_waiting(&mut self, uuid: Uuid, request: VllmRequestState) {
+    fn insert_waiting(&mut self, uuid: Uuid, mut request: VllmRequestState) {
         debug_assert!(!self.requests.contains_key(&uuid));
+        self.submit_counter += 1;
+        request.submit_seq = self.submit_counter;
+        request.enqueued_at_tokens = self.processed_tokens;
         self.requests.insert(uuid, request);
         self.push_waiting(uuid);
+    }
+
+    fn is_live_waiting(&self, uuid: Uuid) -> bool {
+        self.waiting_members.contains(&uuid)
+            && self
+                .requests
+                .get(&uuid)
+                .is_some_and(|request| request.status != RequestStatus::Running)
+    }
+
+    /// Next live request in a policy-chosen order; entries that left the
+    /// queue since the order was computed are skipped.
+    fn next_live_in(&self, order: &[Uuid], cursor: &mut usize) -> Option<Uuid> {
+        while let Some(&uuid) = order.get(*cursor) {
+            *cursor += 1;
+            if self.is_live_waiting(uuid) {
+                return Some(uuid);
+            }
+        }
+        None
     }
 
     fn prepend_waiting(&mut self, uuid: Uuid) {
@@ -181,12 +218,7 @@ impl SchedulerState {
     fn next_waiting_uuid(&mut self, prefer_materialized: bool) -> Option<Uuid> {
         loop {
             let uuid = *self.waiting.front()?;
-            if self.waiting_members.contains(&uuid)
-                && self
-                    .requests
-                    .get(&uuid)
-                    .is_some_and(|request| request.status != RequestStatus::Running)
-            {
+            if self.is_live_waiting(uuid) {
                 break;
             }
             self.waiting.pop_front();
@@ -387,7 +419,9 @@ enum SwapInAdmissionAttempt {
 
 pub(crate) struct VllmCore {
     pub(super) args: MockEngineArgs,
+    worker_id: WorkerId,
     dp_rank: u32,
+    waiting_policy: Option<WaitingPolicyHandle>,
     pub(super) state: SchedulerState,
     pub(super) kv_manager: G1Manager,
     speculative_sampler: Option<SpeculativeDecodeSampler>,
@@ -451,7 +485,7 @@ struct VllmTerminalEffects {
 
 impl VllmCore {
     pub(crate) fn new(args: MockEngineArgs) -> Self {
-        Self::new_internal(args, 0, 0, None, KvEventPublishers::default())
+        Self::new_internal(args, 0, 0, 0, None, KvEventPublishers::default())
     }
 
     pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
@@ -471,7 +505,7 @@ impl VllmCore {
         } else {
             (None, KvEventPublishers::default())
         };
-        Self::new_internal(args, dp_rank, seed_offset, buffer, publishers)
+        Self::new_internal(args, worker_id, dp_rank, seed_offset, buffer, publishers)
     }
 
     pub(super) fn new_with_sink(
@@ -479,11 +513,19 @@ impl VllmCore {
         dp_rank: u32,
         kv_event_publishers: KvEventPublishers,
     ) -> Self {
-        Self::new_internal(args, dp_rank, u64::from(dp_rank), None, kv_event_publishers)
+        Self::new_internal(
+            args,
+            0,
+            dp_rank,
+            u64::from(dp_rank),
+            None,
+            kv_event_publishers,
+        )
     }
 
     fn new_internal(
         args: MockEngineArgs,
+        worker_id: WorkerId,
         dp_rank: u32,
         seed_offset: u64,
         kv_event_buffer: Option<CapturedRouterEventBuffer>,
@@ -511,7 +553,9 @@ impl VllmCore {
                 args.enable_prefix_caching,
             ),
             args,
+            worker_id,
             dp_rank,
+            waiting_policy: None,
             state: SchedulerState::default(),
             speculative_sampler,
             kv_event_buffer,
@@ -545,6 +589,27 @@ impl VllmCore {
     #[cfg(feature = "kvbm-offload")]
     pub(crate) fn init_offload_offline(&mut self) -> anyhow::Result<()> {
         crate::scheduler::init_kvbm_offline(&self.args, &mut self.kv_manager)?;
+        Ok(())
+    }
+
+    /// Install the policy that orders the waiting queue before each pass's
+    /// admission loop. Aggregated vLLM workers only: the TRT-LLM admission rule
+    /// and the disaggregated decode head logic are not covered, and the view
+    /// reports `max_num_seqs` as a number.
+    pub(crate) fn set_waiting_policy(&mut self, policy: WaitingPolicyHandle) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.args.scheduling_policy() == SchedulingPolicy::Vllm,
+            "waiting-queue policies are only supported with the vLLM scheduling policy"
+        );
+        anyhow::ensure!(
+            self.args.worker_type == WorkerType::Aggregated,
+            "waiting-queue policies are only supported on aggregated workers"
+        );
+        anyhow::ensure!(
+            self.args.max_num_seqs.is_some(),
+            "waiting-queue policies need an explicit max_num_seqs"
+        );
+        self.waiting_policy = Some(policy);
         Ok(())
     }
 
@@ -930,6 +995,9 @@ impl VllmCore {
             num_computed_tokens: 0,
             num_preemptions: 0,
             offload_dependency: None,
+            submit_seq: 0,
+            first_seen_ms: None,
+            enqueued_at_tokens: 0,
         }
     }
 
@@ -1492,12 +1560,18 @@ impl VllmCore {
         let max_num_running = self.args.max_num_seqs.unwrap_or(usize::MAX);
         let scheduling_policy = self.args.scheduling_policy();
         let admission = AdmissionInvariant::new(self.pending_destinations.has_pending());
+        let pass_order = self.waiting_policy_order(now_ms, max_num_running, preempted_any)?;
+        let mut order_cursor = 0usize;
         while !preempted_any && self.state.running.len() < max_num_running {
             let prefer_materialized = matches!(
                 admission.stage_for(false),
                 AdmissionStage::PendingDestinationHead
             );
-            let Some(uuid) = self.state.next_waiting_uuid(prefer_materialized) else {
+            let next = match &pass_order {
+                Some(order) => self.state.next_live_in(order, &mut order_cursor),
+                None => self.state.next_waiting_uuid(prefer_materialized),
+            };
+            let Some(uuid) = next else {
                 break;
             };
             if self.refresh_request_offload_dependency(uuid).is_some() {
@@ -1624,6 +1698,11 @@ impl VllmCore {
             }
         }
 
+        self.state.processed_tokens += scheduled
+            .values()
+            .map(|work| work.total_tokens as u64)
+            .sum::<u64>();
+
         let prefill_time =
             predict_prefill_duration(batch_count, batch_total_isl, batch_total_prefix, &self.args)?;
         let decode_start_ms = now_ms + prefill_time.as_secs_f64() * 1000.0;
@@ -1680,6 +1759,111 @@ impl VllmCore {
             accept_length_output_tokens,
             accept_length_decode_forwards,
         })
+    }
+
+    /// Ask the installed waiting policy for this pass's admission order.
+    /// `None` keeps the native order: no policy installed, the admission loop
+    /// would not run, fewer than two live waiting requests, or a prefix-aware
+    /// policy facing a queue deeper than its cap.
+    fn waiting_policy_order(
+        &mut self,
+        now_ms: f64,
+        max_num_running: usize,
+        preempted_any: bool,
+    ) -> anyhow::Result<Option<Vec<Uuid>>> {
+        let Some(handle) = &self.waiting_policy else {
+            return Ok(None);
+        };
+        let live: Vec<Uuid> = self
+            .state
+            .waiting
+            .iter()
+            .copied()
+            .filter(|uuid| self.state.is_live_waiting(*uuid))
+            .collect();
+        for uuid in &live {
+            self.state
+                .requests
+                .get_mut(uuid)
+                .expect("live waiting request")
+                .first_seen_ms
+                .get_or_insert(now_ms);
+        }
+        // Pending destinations exist only on disaggregated decode workers,
+        // which `set_waiting_policy` refuses.
+        debug_assert!(!self.pending_destinations.has_pending());
+        if preempted_any || self.state.running.len() >= max_num_running || live.len() < 2 {
+            return Ok(None);
+        }
+        let mut waiting_policy = handle.lock().expect("waiting policy lock");
+        let uses_prefix_hits = waiting_policy.uses_prefix_hits();
+        if uses_prefix_hits && live.len() > PREFIX_HITS_WAITING_CAP {
+            return Ok(None);
+        }
+
+        let view = WaitingQueueView {
+            now_ms,
+            // Unique per (worker, dp_rank) scheduler; equals the rank id the
+            // aggregated offline replay assigns.
+            worker_id: self.worker_id * u64::from(self.args.dp_size.max(1))
+                + u64::from(self.dp_rank),
+            worker_role: match self.args.worker_type {
+                WorkerType::Aggregated => "aggregated",
+                WorkerType::Prefill => "prefill",
+                WorkerType::Decode => "decode",
+            },
+            num_running: self.state.running.len(),
+            max_num_seqs: max_num_running,
+            waiting_len: live.len(),
+            block_size: self.args.block_size,
+            num_gpu_blocks: self.args.num_gpu_blocks,
+            free_blocks: self
+                .args
+                .num_gpu_blocks
+                .saturating_sub(self.kv_manager.num_active_blocks()),
+            requests: live
+                .iter()
+                .enumerate()
+                .map(|(queue_index, uuid)| {
+                    self.waiting_request_view(queue_index, *uuid, now_ms, uses_prefix_hits)
+                })
+                .collect(),
+        };
+        let order = waiting_policy.order(&view)?;
+        validate_order(&order, live.len())?;
+        Ok(Some(order.into_iter().map(|index| live[index]).collect()))
+    }
+
+    fn waiting_request_view(
+        &self,
+        queue_index: usize,
+        uuid: Uuid,
+        now_ms: f64,
+        uses_prefix_hits: bool,
+    ) -> WaitingRequestView {
+        let request = &self.state.requests[&uuid];
+        let (cached_prefix_tokens, needed_blocks) = if uses_prefix_hits {
+            let (cost, needed) = policy::vllm_prefill_need(
+                self.args.block_size,
+                self.args.aic_nextn.is_some(),
+                &request.sequence,
+                self.kv_manager.get_prefill_cost(&request.sequence),
+            );
+            (Some(cost.cached_tokens), Some(needed))
+        } else {
+            (None, None)
+        };
+        WaitingRequestView {
+            queue_index,
+            submit_seq: request.submit_seq,
+            wait_ms: now_ms - request.first_seen_ms.expect("stamped at pass start"),
+            age_tokens: self.state.processed_tokens - request.enqueued_at_tokens,
+            prompt_tokens: request.sequence.num_input_tokens(),
+            generated_tokens: request.sequence.generated_tokens(),
+            num_preemptions: request.num_preemptions,
+            cached_prefix_tokens,
+            needed_blocks,
+        }
     }
 
     pub(super) fn drop_request(&mut self, uuid: Uuid) {

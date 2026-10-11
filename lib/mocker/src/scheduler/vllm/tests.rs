@@ -1528,6 +1528,9 @@ mod core_behavior {
                 num_computed_tokens: 9,
                 num_preemptions: 1,
                 offload_dependency: None,
+                submit_seq: 0,
+                first_seen_ms: None,
+                enqueued_at_tokens: 0,
             },
         );
 
@@ -3040,6 +3043,9 @@ mod offload {
                 num_computed_tokens,
                 num_preemptions: 0,
                 offload_dependency: None,
+                submit_seq: 0,
+                first_seen_ms: None,
+                enqueued_at_tokens: 0,
             },
         );
     }
@@ -4492,5 +4498,645 @@ mod fidelity {
         let pass = run(&mut core, &mut 0.0, 1).remove(0);
         assert_eq!(admitted(&pass), vec![id]);
         assert!(!pass.output_signals.iter().any(|s| s.rejected));
+    }
+}
+
+mod waiting_policy {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    use super::*;
+    use crate::common::protocols::WorkerType;
+    use crate::replay::TraceCollector;
+    use crate::scheduler::vllm::waiting_policy::{WaitingQueuePolicy, WaitingQueueView};
+    use crate::scheduler::{EngineCore, EnginePassResult, SglangCore};
+
+    struct FnPolicy<F> {
+        uses_prefix_hits: bool,
+        order: F,
+    }
+
+    impl<F> WaitingQueuePolicy for FnPolicy<F>
+    where
+        F: FnMut(&WaitingQueueView) -> anyhow::Result<Vec<usize>> + Send,
+    {
+        fn uses_prefix_hits(&self) -> bool {
+            self.uses_prefix_hits
+        }
+
+        fn order(&mut self, view: &WaitingQueueView) -> anyhow::Result<Vec<usize>> {
+            (self.order)(view)
+        }
+    }
+
+    /// The walkthrough configuration: 20 blocks of 16 tokens, 254 tokens per pass.
+    fn walkthrough_args() -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(16)
+            .num_gpu_blocks(20)
+            .max_num_batched_tokens(Some(254))
+            .max_num_seqs(Some(8))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .preemption_mode(PreemptionMode::Lifo)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap()
+    }
+
+    /// Six blocks of four tokens, 16 tokens per pass.
+    fn small_args(max_num_seqs: usize) -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(6)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(max_num_seqs))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .preemption_mode(PreemptionMode::Lifo)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap()
+    }
+
+    fn request(
+        uuid: u128,
+        tokens: impl IntoIterator<Item = u32>,
+        max_output_tokens: usize,
+    ) -> DirectRequest {
+        DirectRequest {
+            tokens: tokens.into_iter().collect(),
+            max_output_tokens,
+            uuid: Some(Uuid::from_u128(uuid)),
+            ..Default::default()
+        }
+    }
+
+    /// R1..R4 of the walkthrough: 126/40, 128/8, 32/6, 16/2 (prompt/output tokens).
+    fn walkthrough_core() -> VllmCore {
+        let mut core = VllmCore::new(walkthrough_args());
+        core.receive(request(1, 0..126, 40));
+        core.receive(request(2, 1000..1128, 8));
+        core.receive(request(3, 2000..2032, 6));
+        core.receive(request(4, 3000..3016, 2));
+        core
+    }
+
+    fn install(
+        core: &mut VllmCore,
+        uses_prefix_hits: bool,
+        mut order: impl FnMut(&WaitingQueueView) -> Vec<usize> + Send + 'static,
+    ) -> Arc<Mutex<usize>> {
+        let calls = Arc::new(Mutex::new(0usize));
+        let counter = calls.clone();
+        core.set_waiting_policy(Arc::new(Mutex::new(FnPolicy {
+            uses_prefix_hits,
+            order: move |view: &WaitingQueueView| {
+                *counter.lock().unwrap() += 1;
+                Ok(order(view))
+            },
+        })))
+        .unwrap();
+        calls
+    }
+
+    fn identity(view: &WaitingQueueView) -> Vec<usize> {
+        (0..view.requests.len()).collect()
+    }
+
+    fn shortest_first(view: &WaitingQueueView) -> Vec<usize> {
+        let mut order = identity(view);
+        order.sort_by_key(|&i| {
+            let r = &view.requests[i];
+            (r.prompt_tokens + r.generated_tokens, r.submit_seq)
+        });
+        order
+    }
+
+    /// Native order for fresh requests; preempted requests shortest first.
+    /// Plain shortest-first would reorder the fresh requests in pass 1, and
+    /// the walkthrough's preemptions would never happen.
+    fn preempted_shortest_first(view: &WaitingQueueView) -> Vec<usize> {
+        let mut order = identity(view);
+        order.sort_by_key(|&i| {
+            let r = &view.requests[i];
+            let preempted = r.num_preemptions > 0;
+            (
+                !preempted,
+                if preempted {
+                    r.prompt_tokens + r.generated_tokens
+                } else {
+                    0
+                },
+                r.submit_seq,
+            )
+        });
+        order
+    }
+
+    /// Runs `passes` passes, advancing the caller's clock.
+    fn run(core: &mut VllmCore, now_ms: &mut f64, passes: usize) -> Vec<EnginePassResult> {
+        let mut collector = TraceCollector::default();
+        (0..passes)
+            .map(|_| {
+                let pass = core.execute_pass(&mut collector, *now_ms);
+                *now_ms = pass.end_ms.max(*now_ms + 1.0);
+                pass
+            })
+            .collect()
+    }
+
+    fn admitted(pass: &EnginePassResult) -> Vec<(Uuid, usize)> {
+        pass.admissions
+            .iter()
+            .map(|a| (a.uuid, a.reused_input_tokens))
+            .collect()
+    }
+
+    /// Token ids are sampled at random; compare who emitted, finished and was rejected.
+    fn signals(pass: &EnginePassResult) -> Vec<(Uuid, bool, bool)> {
+        pass.output_signals
+            .iter()
+            .map(|s| (s.uuid, s.completed, s.rejected))
+            .collect()
+    }
+
+    fn assert_same_passes(native: &[EnginePassResult], reordered: &[EnginePassResult]) {
+        assert_eq!(native.len(), reordered.len());
+        for (i, (a, b)) in native.iter().zip(reordered).enumerate() {
+            assert_eq!(a.end_ms, b.end_ms, "pass {i}");
+            assert_eq!(admitted(a), admitted(b), "pass {i}");
+            assert_eq!(signals(a), signals(b), "pass {i}");
+            assert_eq!(
+                a.mocker_metrics.vllm_preemptions_total, b.mocker_metrics.vllm_preemptions_total,
+                "pass {i}"
+            );
+        }
+    }
+
+    /// 0-based indices of the passes that admitted `uuid`.
+    fn admission_passes(passes: &[EnginePassResult], uuid: u128) -> Vec<usize> {
+        passes
+            .iter()
+            .enumerate()
+            .filter(|(_, pass)| admitted(pass).iter().any(|a| a.0 == Uuid::from_u128(uuid)))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn assert_all_complete(passes: &[EnginePassResult], uuids: impl IntoIterator<Item = u128>) {
+        for uuid in uuids {
+            assert!(
+                passes
+                    .iter()
+                    .flat_map(signals)
+                    .any(|(id, completed, _)| id == Uuid::from_u128(uuid) && completed),
+                "request {uuid} must complete"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_policy_matches_native_on_the_walkthrough() {
+        let mut native = walkthrough_core();
+        let mut reordered = walkthrough_core();
+        let calls = install(&mut reordered, true, identity);
+        assert_same_passes(
+            &run(&mut native, &mut 0.0, 40),
+            &run(&mut reordered, &mut 0.0, 40),
+        );
+        assert!(*calls.lock().unwrap() > 0);
+    }
+
+    #[test]
+    fn identity_policy_matches_native_on_a_random_workload() {
+        let args = MockEngineArgs::builder()
+            .block_size(16)
+            .num_gpu_blocks(24)
+            .max_num_batched_tokens(Some(128))
+            .max_num_seqs(Some(6))
+            .max_model_len(Some(160))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .preemption_mode(PreemptionMode::Lifo)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut rng = StdRng::seed_from_u64(7);
+        let prefixes: Vec<Vec<u32>> = (0..5u32)
+            .map(|p| (p * 1000..p * 1000 + rng.random_range(16..=64)).collect())
+            .collect();
+        let specs: Vec<(u128, Vec<u32>, usize)> = (1..=60u128)
+            .map(|i| {
+                let mut tokens = if rng.random_bool(0.4) {
+                    prefixes[rng.random_range(0..prefixes.len())].clone()
+                } else {
+                    Vec::new()
+                };
+                let base = 10_000 * i as u32;
+                tokens.extend(base..base + rng.random_range(4..=170));
+                (i, tokens, rng.random_range(1..=20))
+            })
+            .collect();
+
+        let mut native = VllmCore::new(args.clone());
+        let mut reordered = VllmCore::new(args);
+        let calls = install(&mut reordered, true, identity);
+        let (mut native_collector, mut reordered_collector) =
+            (TraceCollector::default(), TraceCollector::default());
+        let (mut native_passes, mut reordered_passes) = (Vec::new(), Vec::new());
+        let mut arrivals = specs.iter();
+        let mut now_ms = 0.0;
+        for _ in 0..80 {
+            for (uuid, tokens, max_output_tokens) in arrivals.by_ref().take(3) {
+                native.receive(request(*uuid, tokens.iter().copied(), *max_output_tokens));
+                reordered.receive(request(*uuid, tokens.iter().copied(), *max_output_tokens));
+            }
+            let a = native.execute_pass(&mut native_collector, now_ms);
+            let b = reordered.execute_pass(&mut reordered_collector, now_ms);
+            now_ms = a.end_ms.max(now_ms + 1.0);
+            native_passes.push(a);
+            reordered_passes.push(b);
+        }
+        assert_same_passes(&native_passes, &reordered_passes);
+        assert!(*calls.lock().unwrap() > 0);
+        // The workload must exercise rejection, preemption and prefix reuse.
+        assert!(
+            native_passes
+                .iter()
+                .flat_map(signals)
+                .any(|(_, _, rejected)| rejected)
+        );
+        assert!(
+            native_passes
+                .last()
+                .unwrap()
+                .mocker_metrics
+                .vllm_preemptions_total
+                > 0
+        );
+        assert!(
+            native_passes
+                .iter()
+                .flat_map(admitted)
+                .any(|(_, reused)| reused > 0)
+        );
+    }
+
+    #[test]
+    fn preempted_shortest_first_readmits_the_small_request_in_pass_5() {
+        let mut native = walkthrough_core();
+        let mut reordered = walkthrough_core();
+        install(&mut reordered, true, preempted_shortest_first);
+        let native_passes = run(&mut native, &mut 0.0, 40);
+        let reordered_passes = run(&mut reordered, &mut 0.0, 40);
+        // Walkthrough pass numbers are 1-based; admission_passes returns 0-based
+        // indices. R4 is preempted in pass 3 and R3 in pass 4. Natively R3
+        // blocks the head until R2 completes at the end of pass 8, so both are
+        // re-admitted in pass 9 (index 8). R4 fits from pass 5 (index 4) on.
+        assert_eq!(admission_passes(&native_passes, 3), vec![1, 8]);
+        assert_eq!(admission_passes(&native_passes, 4), vec![1, 8]);
+        assert_eq!(admission_passes(&reordered_passes, 3), vec![1, 8]);
+        assert_eq!(admission_passes(&reordered_passes, 4), vec![1, 4]);
+        assert_all_complete(&native_passes, 1..=4);
+        assert_all_complete(&reordered_passes, 1..=4);
+    }
+
+    #[test]
+    fn non_fitting_candidate_first_admits_nothing() {
+        // After pass 1 the holder owns 4 of 6 blocks with two free slots in its
+        // last block, so its pass-2 decode token needs no new block.
+        let pass_2 = |policy: Option<fn(&WaitingQueueView) -> Vec<usize>>| {
+            let mut core = VllmCore::new(small_args(3));
+            core.receive(request(1, 0..14, 4));
+            if let Some(order) = policy {
+                install(&mut core, true, order);
+            }
+            let mut now_ms = 0.0;
+            run(&mut core, &mut now_ms, 1);
+            core.receive(request(2, 100..104, 1));
+            core.receive(request(3, 200..212, 1));
+            run(&mut core, &mut now_ms, 1).remove(0)
+        };
+        assert_eq!(admitted(&pass_2(None)), vec![(Uuid::from_u128(2), 0)]);
+        let largest_first = pass_2(Some(|view| {
+            let mut order = shortest_first(view);
+            order.reverse();
+            order
+        }));
+        assert!(admitted(&largest_first).is_empty());
+    }
+
+    #[test]
+    fn not_called_when_the_loop_would_not_run() {
+        // One live waiting request.
+        let mut core = VllmCore::new(small_args(3));
+        core.receive(request(1, 0..16, 1));
+        let calls = install(&mut core, true, identity);
+        run(&mut core, &mut 0.0, 1);
+        assert_eq!(*calls.lock().unwrap(), 0);
+
+        // Running set full.
+        let mut core = VllmCore::new(small_args(1));
+        core.receive(request(1, 0..4, 4));
+        let calls = install(&mut core, true, identity);
+        let mut now_ms = 0.0;
+        run(&mut core, &mut now_ms, 1);
+        core.receive(request(2, 100..104, 1));
+        core.receive(request(3, 200..204, 1));
+        run(&mut core, &mut now_ms, 1);
+        assert_eq!(*calls.lock().unwrap(), 0);
+
+        // The pass that preempts does not consult the policy; the next one does.
+        let mut core = VllmCore::new(small_args(2));
+        core.receive(request(1, 0..8, 8));
+        core.receive(request(2, 100..108, 8));
+        core.receive(request(3, 200..208, 1));
+        let calls = install(&mut core, true, identity);
+        let mut collector = TraceCollector::default();
+        let mut now_ms = 0.0;
+        let mut preempting_pass_calls = None;
+        for _ in 0..16 {
+            let before = *calls.lock().unwrap();
+            let pass = core.execute_pass(&mut collector, now_ms);
+            now_ms = pass.end_ms.max(now_ms + 1.0);
+            if pass.mocker_metrics.vllm_preemptions_total > 0 {
+                preempting_pass_calls = Some((before, *calls.lock().unwrap()));
+                break;
+            }
+        }
+        let (before, after) = preempting_pass_calls.expect("a preemption must happen");
+        assert_eq!(before, after);
+        assert!(core.state.waiting.len() >= 2);
+        core.execute_pass(&mut collector, now_ms);
+        assert_eq!(*calls.lock().unwrap(), after + 1);
+    }
+
+    #[test]
+    fn prefix_aware_policy_skips_queues_deeper_than_the_cap() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(1024)
+            .max_num_batched_tokens(Some(8))
+            .max_num_seqs(Some(256))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        for (waiting, uses_prefix_hits, expected_calls) in
+            [(128, true, 1), (129, true, 0), (129, false, 1)]
+        {
+            let mut core = VllmCore::new(args.clone());
+            for i in 1..=waiting {
+                core.receive(request(i, 0..4, 1));
+            }
+            let calls = install(&mut core, uses_prefix_hits, identity);
+            let pass = run(&mut core, &mut 0.0, 1).remove(0);
+            assert_eq!(*calls.lock().unwrap(), expected_calls, "waiting={waiting}");
+            assert_eq!(
+                admitted(&pass),
+                vec![(Uuid::from_u128(1), 0), (Uuid::from_u128(2), 0)]
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_order_or_policy_error_fails_the_pass() {
+        let two_waiting = || {
+            let mut core = VllmCore::new(small_args(3));
+            core.receive(request(1, 0..4, 1));
+            core.receive(request(2, 100..104, 1));
+            core
+        };
+        for bad in [vec![0usize, 0], vec![], vec![0, 1, 2, 3]] {
+            let mut core = two_waiting();
+            install(&mut core, true, move |_| bad.clone());
+            assert!(
+                core.try_execute_pass(&mut TraceCollector::default(), 0.0)
+                    .is_err()
+            );
+        }
+        let mut core = two_waiting();
+        core.set_waiting_policy(Arc::new(Mutex::new(FnPolicy {
+            uses_prefix_hits: false,
+            order: |_: &WaitingQueueView| -> anyhow::Result<Vec<usize>> { anyhow::bail!("boom") },
+        })))
+        .unwrap();
+        let error = core
+            .try_execute_pass(&mut TraceCollector::default(), 0.0)
+            .unwrap_err();
+        assert!(error.to_string().contains("boom"));
+    }
+
+    fn record_views(
+        core: &mut VllmCore,
+        uses_prefix_hits: bool,
+        order: fn(&WaitingQueueView) -> Vec<usize>,
+    ) -> Arc<Mutex<Vec<WaitingQueueView>>> {
+        let views: Arc<Mutex<Vec<WaitingQueueView>>> = Arc::default();
+        let sink = views.clone();
+        install(core, uses_prefix_hits, move |view| {
+            sink.lock().unwrap().push(view.clone());
+            order(view)
+        });
+        views
+    }
+
+    #[test]
+    fn view_fields_follow_the_queue() {
+        let mut core = VllmCore::new(small_args(3));
+        core.receive(request(1, 0..16, 8));
+        core.receive(request(2, 100..112, 1));
+        core.receive(request(3, 200..204, 1));
+        let views = record_views(&mut core, true, identity);
+        let passes = run(&mut core, &mut 0.0, 2);
+        let views = views.lock().unwrap();
+        assert_eq!(views.len(), 2);
+
+        let first = &views[0];
+        assert_eq!(first.now_ms, 0.0);
+        assert_eq!(first.worker_role, "aggregated");
+        assert_eq!(
+            (first.block_size, first.num_gpu_blocks, first.free_blocks),
+            (4, 6, 6)
+        );
+        assert_eq!(
+            (first.num_running, first.max_num_seqs, first.waiting_len),
+            (0, 3, 3)
+        );
+        let seqs: Vec<u64> = first.requests.iter().map(|r| r.submit_seq).collect();
+        assert_eq!(seqs, vec![1, 2, 3]);
+        assert!(
+            first
+                .requests
+                .iter()
+                .all(|r| r.wait_ms == 0.0 && r.age_tokens == 0)
+        );
+
+        // The holder's 16-token prompt fills 4 blocks; its first generated
+        // token takes a fifth at the start of pass 2.
+        let second = &views[1];
+        assert_eq!(second.now_ms, passes[0].end_ms);
+        assert_eq!(
+            (second.num_running, second.waiting_len, second.free_blocks),
+            (1, 2, 1)
+        );
+        let blocked = &second.requests[0];
+        assert_eq!((blocked.queue_index, blocked.submit_seq), (0, 2));
+        assert_eq!((blocked.prompt_tokens, blocked.generated_tokens), (12, 0));
+        assert_eq!(
+            (blocked.cached_prefix_tokens, blocked.needed_blocks),
+            (Some(0), Some(3))
+        );
+        assert_eq!(blocked.wait_ms, passes[0].end_ms);
+        assert_eq!(
+            blocked.age_tokens, 16,
+            "the holder's 16-token prefill ran in pass 1"
+        );
+        assert_eq!(second.requests[1].needed_blocks, Some(1));
+    }
+
+    #[test]
+    fn prefix_fields_are_absent_without_uses_prefix_hits() {
+        let mut core = VllmCore::new(small_args(3));
+        core.receive(request(1, 0..4, 1));
+        core.receive(request(2, 100..104, 1));
+        let views = record_views(&mut core, false, identity);
+        run(&mut core, &mut 0.0, 1);
+        let views = views.lock().unwrap();
+        assert_eq!(views.len(), 1);
+        assert!(
+            views[0]
+                .requests
+                .iter()
+                .all(|r| r.cached_prefix_tokens.is_none() && r.needed_blocks.is_none())
+        );
+    }
+
+    #[test]
+    fn prefix_fields_match_the_admission_arithmetic() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(32)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let views = record_views(&mut core, true, identity);
+        let mut now_ms = 0.0;
+        // A runs alone; its two prompt blocks stay active while it decodes.
+        core.receive(request(1, 0..8, 2));
+        run(&mut core, &mut now_ms, 1);
+        // C repeats A's prompt exactly: the hit is clipped to length - 1 and
+        // then to whole blocks. D extends it by one block: a full active hit.
+        core.receive(request(2, 0..8, 1));
+        core.receive(request(3, (0..8).chain(100..104), 1));
+        let pass_2 = run(&mut core, &mut now_ms, 1).remove(0);
+        // A, C and D are done; their blocks are cached but inactive, so a hit
+        // on them saves compute but not capacity.
+        core.receive(request(4, (0..8).chain(200..204), 1));
+        core.receive(request(5, 300..304, 1));
+        let pass_3 = run(&mut core, &mut now_ms, 1).remove(0);
+
+        let views = views.lock().unwrap();
+        assert_eq!(views.len(), 2);
+        let fields = |view: &WaitingQueueView| {
+            view.requests
+                .iter()
+                .map(|r| (r.cached_prefix_tokens, r.needed_blocks))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            views[0].free_blocks, 29,
+            "A holds two prompt blocks and one decode block"
+        );
+        assert_eq!(
+            fields(&views[0]),
+            vec![(Some(4), Some(1)), (Some(8), Some(1))]
+        );
+        assert_eq!(
+            views[1].free_blocks, 32,
+            "inactive cached blocks count as free"
+        );
+        assert_eq!(
+            fields(&views[1]),
+            vec![(Some(8), Some(3)), (Some(0), Some(1))]
+        );
+        // The pass-start snapshot equals what admission reused: neither
+        // admission in a pass changes the other's hit here.
+        assert_eq!(
+            admitted(&pass_2),
+            vec![(Uuid::from_u128(2), 4), (Uuid::from_u128(3), 8)]
+        );
+        assert_eq!(
+            admitted(&pass_3),
+            vec![(Uuid::from_u128(4), 8), (Uuid::from_u128(5), 0)]
+        );
+    }
+
+    #[test]
+    fn fields_persist_across_preemption_and_never_decrease() {
+        let mut core = walkthrough_core();
+        let views = record_views(&mut core, true, preempted_shortest_first);
+        run(&mut core, &mut 0.0, 40);
+        let views = views.lock().unwrap();
+        let mut last: HashMap<u64, (f64, u64)> = HashMap::new();
+        let mut preempted_views = 0;
+        for view in views.iter() {
+            for r in &view.requests {
+                if let Some((wait_ms, age_tokens)) = last.get(&r.submit_seq) {
+                    assert!(r.wait_ms >= *wait_ms && r.age_tokens >= *age_tokens);
+                }
+                last.insert(r.submit_seq, (r.wait_ms, r.age_tokens));
+                if r.num_preemptions > 0 {
+                    preempted_views += 1;
+                    assert!(r.generated_tokens >= 1);
+                    assert!(r.submit_seq == 3 || r.submit_seq == 4);
+                    assert!(r.wait_ms > 0.0 && r.age_tokens > 0);
+                }
+            }
+        }
+        assert!(preempted_views > 0);
+    }
+
+    #[test]
+    fn installation_is_refused_outside_aggregated_vllm() {
+        let policy = || -> Arc<Mutex<dyn WaitingQueuePolicy>> {
+            Arc::new(Mutex::new(FnPolicy {
+                uses_prefix_hits: false,
+                order: |view: &WaitingQueueView| Ok(identity(view)),
+            }))
+        };
+        let mut trtllm = VllmCore::new(make_args_for_engine(EngineType::Trtllm));
+        assert!(trtllm.set_waiting_policy(policy()).is_err());
+
+        let prefill_args = MockEngineArgs::builder()
+            .worker_type(WorkerType::Prefill)
+            .build()
+            .unwrap();
+        let mut prefill = VllmCore::new(prefill_args);
+        assert!(prefill.set_waiting_policy(policy()).is_err());
+
+        let unbounded_args = MockEngineArgs::builder()
+            .max_num_seqs(None)
+            .build()
+            .unwrap();
+        let mut unbounded = VllmCore::new(unbounded_args);
+        assert!(unbounded.set_waiting_policy(policy()).is_err());
+
+        let mut sglang =
+            EngineCore::Sglang(SglangCore::new(make_args_for_engine(EngineType::Sglang)));
+        assert!(sglang.set_waiting_policy(policy()).is_err());
+
+        let mut vllm = EngineCore::Vllm(VllmCore::new(small_args(3)));
+        assert!(vllm.set_waiting_policy(policy()).is_ok());
     }
 }
