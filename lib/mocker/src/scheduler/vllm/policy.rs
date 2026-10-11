@@ -123,7 +123,31 @@ pub(super) fn apply_prefix_recompute(
     apply_mtp_prefix_recompute(policy, block_size, mtp_enabled, prefill_cost)
 }
 
-/// Decide whether the FIFO head can enter the shared scheduler core.
+/// Prefix cost after the vLLM recompute rule and the blocks admission would
+/// allocate for the candidate: its known sequence minus the active cached
+/// prefix. Shared by the admission decision and the waiting-policy view.
+pub(super) fn vllm_prefill_need(
+    block_size: usize,
+    mtp_enabled: bool,
+    sequence: &ActiveSequence,
+    raw_prefill_cost: PrefillCost,
+) -> (PrefillCost, usize) {
+    let prefill_cost = apply_prefix_recompute(
+        SchedulingPolicy::Vllm,
+        sequence.len(),
+        block_size,
+        mtp_enabled,
+        !generation_complete(sequence, None),
+        raw_prefill_cost,
+    );
+    let needed = sequence
+        .current_known_blocks()
+        .saturating_sub(prefill_cost.active_cached_tokens / block_size);
+    (prefill_cost, needed)
+}
+
+/// Decide whether a waiting candidate (the FIFO head, or the next request in
+/// the installed policy's order) can enter the shared scheduler core.
 ///
 /// vLLM reserves only the current known sequence. TRT-LLM
 /// `GUARANTEED_NO_EVICT` reserves the request through its maximum completion
@@ -161,26 +185,28 @@ pub(super) fn decide_waiting_admission<'a>(
 
     let raw_prefill_cost = kv_manager.get_prefill_cost(sequence);
     let g1_cached_tokens = raw_prefill_cost.cached_tokens;
-    let prefill_cost = apply_prefix_recompute(
-        policy,
-        sequence.len(),
-        block_size,
-        mtp_enabled,
-        !generation_complete(sequence, None),
-        raw_prefill_cost,
-    );
+    let (prefill_cost, needed) = match policy {
+        SchedulingPolicy::Vllm => {
+            vllm_prefill_need(block_size, mtp_enabled, sequence, raw_prefill_cost)
+        }
+        SchedulingPolicy::TrtllmGuaranteedNoEvict => {
+            let prefill_cost = apply_prefix_recompute(
+                policy,
+                sequence.len(),
+                block_size,
+                mtp_enabled,
+                !generation_complete(sequence, None),
+                raw_prefill_cost,
+            );
+            let needed =
+                blocks_needed_to_finish(sequence, block_size, kv_manager, Some(&prefill_cost));
+            (prefill_cost, needed)
+        }
+    };
     let available = match policy {
         SchedulingPolicy::Vllm => num_gpu_blocks.saturating_sub(kv_manager.num_active_blocks()),
         SchedulingPolicy::TrtllmGuaranteedNoEvict => {
             available_blocks(running, num_gpu_blocks, block_size, kv_manager)
-        }
-    };
-    let needed = match policy {
-        SchedulingPolicy::Vllm => sequence
-            .current_known_blocks()
-            .saturating_sub(prefill_cost.active_cached_tokens / block_size),
-        SchedulingPolicy::TrtllmGuaranteedNoEvict => {
-            blocks_needed_to_finish(sequence, block_size, kv_manager, Some(&prefill_cost))
         }
     };
 
