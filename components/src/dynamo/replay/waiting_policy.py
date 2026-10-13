@@ -77,7 +77,16 @@ def load(path) -> ModuleType:
 class ScoreOrder:
     """What the replay binding calls once per pass: scores every waiting
     request with the module's ``score`` and returns the admission order as
-    indices into ``view["requests"]``."""
+    indices into ``view["requests"]``.
+
+    With a ``decision_log`` (a writable text file) every call appends one JSON
+    line: the ``ctx`` fields that change between passes (``now_ms``,
+    ``worker_id``, ``num_running``, ``waiting_len``, ``free_blocks``), then
+    ``requests``, the waiting requests exactly as the policy received them, in
+    native order with every field, and ``order``, the ``submit_seq`` of each
+    request in the order the policy chose. The constant ``ctx`` fields
+    (``worker_role``, ``max_num_seqs``, ``block_size``, ``num_gpu_blocks``) are
+    not repeated."""
 
     def __init__(self, module: ModuleType, decision_log=None):
         self.score = module.score
@@ -89,15 +98,16 @@ class ScoreOrder:
         started = time.perf_counter()
         requests = view.pop("requests")
         ctx = view
-        # Read before scoring: a policy may mutate the dicts it is given.
+        # Copied before scoring: a policy may mutate the dicts it is given.
         log_line = None
         if self.decision_log is not None:
             log_line = {
                 "now_ms": ctx["now_ms"],
                 "worker_id": ctx["worker_id"],
-                "waiting_len": len(requests),
                 "num_running": ctx["num_running"],
+                "waiting_len": len(requests),
                 "free_blocks": ctx["free_blocks"],
+                "requests": [dict(request) for request in requests],
             }
         keyed = []
         for index, request in enumerate(requests):
@@ -117,6 +127,6 @@ class ScoreOrder:
             self.stats["max_waiting_len"], len(requests)
         )
         if log_line is not None:
-            log_line["order"] = [submit_seq for _, submit_seq, _ in keyed[:8]]
+            log_line["order"] = [submit_seq for _, submit_seq, _ in keyed]
             self.decision_log.write(json.dumps(log_line) + "\n")
         return [index for _, _, index in keyed]

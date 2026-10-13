@@ -30,6 +30,25 @@ pytestmark = [
 
 POLICIES = Path(__file__).resolve().parents[1] / "policies"
 TRACE_BLOCK_SIZE = 16
+LOG_KEYS = {
+    "now_ms",
+    "worker_id",
+    "num_running",
+    "waiting_len",
+    "free_blocks",
+    "requests",
+    "order",
+}
+REQUEST_KEYS = {
+    "queue_index",
+    "submit_seq",
+    "wait_ms",
+    "age_tokens",
+    "prompt_tokens",
+    "generated_tokens",
+    "num_preemptions",
+}
+PREFIX_KEYS = REQUEST_KEYS | {"cached_prefix_tokens", "needed_blocks"}
 # Replay wall time and what is derived from it differ run to run.
 WALL_TIME_KEYS = (
     "wall_time_ms",
@@ -153,10 +172,18 @@ def test_fcfs_matches_native_order(
         *fcfs, single_worker=single
     )
     assert fcfs[0]["waiting_policy_stats"]["calls"] > 0
-    workers_seen = {
-        json.loads(line)["worker_id"] for line in log.read_text().splitlines()
-    }
-    assert workers_seen == set(range(num_workers))
+    lines = [json.loads(line) for line in log.read_text().splitlines()]
+    assert {line["worker_id"] for line in lines} == set(range(num_workers))
+    # Each line is the view the policy saw and the order it chose.
+    for line in lines:
+        assert set(line) == LOG_KEYS
+        assert len(line["requests"]) == line["waiting_len"] >= 2
+        assert all(set(r) == REQUEST_KEYS for r in line["requests"])
+        assert sorted(line["order"]) == sorted(
+            r["submit_seq"] for r in line["requests"]
+        )
+        # fcfs keeps the native order.
+        assert line["order"] == [r["submit_seq"] for r in line["requests"]]
 
 
 def test_spf_reorders_and_is_deterministic(seeded_router, trace, tmp_path):
@@ -286,14 +313,7 @@ def test_report_and_log_do_not_depend_on_the_hash_seed(seeded_router, trace, tmp
         outputs.append((out.read_text(), log.read_text()))
     assert outputs[0] == outputs[1]
     first_line = json.loads(outputs[0][1].splitlines()[0])
-    assert set(first_line) == {
-        "now_ms",
-        "worker_id",
-        "waiting_len",
-        "num_running",
-        "free_blocks",
-        "order",
-    }
+    assert set(first_line) == LOG_KEYS
 
 
 def test_policy_exception_propagates(trace, tmp_path):
@@ -406,6 +426,50 @@ def test_synthetic_unsupported_combinations_are_rejected(kwargs, message):
             waiting_policy=POLICIES / "fcfs.py",
             **kwargs,
         )
+
+
+def test_log_carries_prefix_fields_and_the_policy_order(trace, tmp_path):
+    log = tmp_path / "decisions.jsonl"
+    replay(
+        trace,
+        tmp_path,
+        "lpm",
+        waiting_policy=POLICIES / "lpm.py",
+        waiting_policy_log=log,
+    )
+    lines = [json.loads(line) for line in log.read_text().splitlines()]
+    assert lines
+    assert all(set(r) == PREFIX_KEYS for line in lines for r in line["requests"])
+    # lpm's order: preempted first in native order, then most cached prefix first.
+    for line in lines:
+        by_seq = {r["submit_seq"]: r for r in line["requests"]}
+        ranked = [by_seq[seq] for seq in line["order"]]
+        new = [r for r in ranked if r["num_preemptions"] == 0]
+        assert ranked[: len(ranked) - len(new)] == [
+            r for r in line["requests"] if r["num_preemptions"] > 0
+        ]
+        assert [r["cached_prefix_tokens"] for r in new] == sorted(
+            (r["cached_prefix_tokens"] for r in new), reverse=True
+        )
+    assert any(len(line["order"]) > 8 for line in lines) or all(
+        len(line["order"]) == line["waiting_len"] for line in lines
+    )
+
+
+def test_log_shows_the_requests_before_the_policy_touched_them(trace, tmp_path):
+    policy = tmp_path / "mutating.py"
+    policy.write_text(
+        "def score(request, ctx):\n"
+        "    request['prompt_tokens'] = -1\n"
+        "    ctx['now_ms'] = -1.0\n"
+        "    return float(request['queue_index'])\n"
+    )
+    log = tmp_path / "decisions.jsonl"
+    replay(trace, tmp_path, "mutating", waiting_policy=policy, waiting_policy_log=log)
+    lines = [json.loads(line) for line in log.read_text().splitlines()]
+    assert lines
+    assert all(r["prompt_tokens"] > 0 for line in lines for r in line["requests"])
+    assert all(line["now_ms"] >= 0 for line in lines)
 
 
 def test_log_without_policy_is_rejected(trace, tmp_path):
