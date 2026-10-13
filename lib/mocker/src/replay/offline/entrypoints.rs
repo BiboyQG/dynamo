@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -201,6 +202,7 @@ pub(crate) fn simulate_trace(
         sla,
         None,
         None,
+        None,
     )
 }
 
@@ -218,9 +220,11 @@ pub(crate) fn simulate_trace_with_scaling_policy(
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     waiting_policy: Option<WaitingPolicyHandle>,
+    fpm_log: Option<PathBuf>,
 ) -> Result<TraceSimulationReport> {
     if scaling_policy.is_none()
         && waiting_policy.is_none()
+        && fpm_log.is_none()
         && use_single_runtime(num_workers, args.dp_size, router_mode)
     {
         simulate_trace_single(
@@ -245,6 +249,7 @@ pub(crate) fn simulate_trace_with_scaling_policy(
             sla,
             scaling_policy,
             waiting_policy,
+            fpm_log,
         )
     }
 }
@@ -345,6 +350,7 @@ pub(crate) fn simulate_trace_workload(
         sla,
         None,
         None,
+        None,
     )
 }
 
@@ -362,6 +368,7 @@ pub(crate) fn simulate_trace_workload_with_scaling_policy(
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     waiting_policy: Option<WaitingPolicyHandle>,
+    fpm_log: Option<PathBuf>,
 ) -> Result<TraceSimulationReport> {
     simulate_trace_workload_with_delta_mode(
         args,
@@ -377,6 +384,7 @@ pub(crate) fn simulate_trace_workload_with_scaling_policy(
         sla,
         scaling_policy,
         waiting_policy,
+        fpm_log,
     )
 }
 
@@ -405,6 +413,7 @@ pub(crate) fn simulate_trace_workload_without_session_metadata(
         record_per_request,
         max_sim_time_ms,
         sla,
+        None,
         None,
         None,
     )
@@ -460,6 +469,7 @@ pub(crate) fn simulate_trace_workload_accumulating_deltas(
         sla,
         None,
         None,
+        None,
     )
 }
 
@@ -478,9 +488,11 @@ fn simulate_trace_workload_with_delta_mode(
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     waiting_policy: Option<WaitingPolicyHandle>,
+    fpm_log: Option<PathBuf>,
 ) -> Result<TraceSimulationReport> {
     if scaling_policy.is_none()
         && waiting_policy.is_none()
+        && fpm_log.is_none()
         && use_single_runtime(num_workers, args.dp_size, router_mode)
     {
         simulate_trace_workload_single(
@@ -507,6 +519,7 @@ fn simulate_trace_workload_with_delta_mode(
             sla,
             scaling_policy,
             waiting_policy,
+            fpm_log,
         )
     }
 }
@@ -1113,6 +1126,7 @@ pub(crate) fn simulate_trace_multi(
         sla,
         None,
         None,
+        None,
     )
 }
 
@@ -1130,6 +1144,7 @@ fn simulate_trace_multi_with_scaling_policy(
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     waiting_policy: Option<WaitingPolicyHandle>,
+    fpm_log: Option<PathBuf>,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -1144,7 +1159,8 @@ fn simulate_trace_multi_with_scaling_policy(
             )?
             .with_per_request_records(record_per_request)
             .with_max_sim_time_ms(max_sim_time_ms)
-            .with_waiting_policy(waiting_policy)?,
+            .with_waiting_policy(waiting_policy)?
+            .with_fpm_log(fpm_log.as_deref())?,
         ),
         ReplayRouterMode::KvRouter => PreparedOfflineReplay::AggKv(
             AggRuntime::new(
@@ -1158,7 +1174,8 @@ fn simulate_trace_multi_with_scaling_policy(
             )?
             .with_per_request_records(record_per_request)
             .with_max_sim_time_ms(max_sim_time_ms)
-            .with_waiting_policy(waiting_policy)?,
+            .with_waiting_policy(waiting_policy)?
+            .with_fpm_log(fpm_log.as_deref())?,
         ),
     };
     let collector = prepared.run(scaling_policy)?;
@@ -1269,6 +1286,7 @@ pub(crate) fn simulate_trace_workload_multi(
         sla,
         None,
         None,
+        None,
     )
 }
 
@@ -1287,6 +1305,7 @@ fn simulate_trace_workload_multi_with_scaling_policy(
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     waiting_policy: Option<WaitingPolicyHandle>,
+    fpm_log: Option<PathBuf>,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -1309,7 +1328,8 @@ fn simulate_trace_workload_multi_with_scaling_policy(
             )?
             .with_per_request_records(record_per_request)
             .with_max_sim_time_ms(max_sim_time_ms)
-            .with_waiting_policy(waiting_policy)?,
+            .with_waiting_policy(waiting_policy)?
+            .with_fpm_log(fpm_log.as_deref())?,
         ),
         ReplayRouterMode::KvRouter => PreparedOfflineReplay::AggKv(
             AggRuntime::new_workload(
@@ -1323,7 +1343,8 @@ fn simulate_trace_workload_multi_with_scaling_policy(
             )?
             .with_per_request_records(record_per_request)
             .with_max_sim_time_ms(max_sim_time_ms)
-            .with_waiting_policy(waiting_policy)?,
+            .with_waiting_policy(waiting_policy)?
+            .with_fpm_log(fpm_log.as_deref())?,
         ),
     };
     let collector = prepared.run(scaling_policy)?;

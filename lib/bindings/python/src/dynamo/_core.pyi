@@ -2607,6 +2607,7 @@ def run_mocker_trace_replay(
     sla_e2e_ms: Optional[float] = None,
     scaling_policy: Optional[Any] = None,
     waiting_policy: Optional[Any] = None,
+    fpm_log: Optional[str | os.PathLike[str]] = None,
 ) -> Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2630,6 +2631,10 @@ def run_mocker_trace_replay(
     called once per scheduler pass to order the waiting queue. Offline
     aggregated replay of a Mooncake trace without ``replay_concurrency`` only;
     anything else raises ``ValueError``.
+
+    ``fpm_log`` writes one JSON line per worker iteration (the forward-pass
+    snapshot a scaling policy sees, plus ``now_ms``, the simulated time the
+    iteration ended). Same restrictions as ``waiting_policy``.
     """
     ...
 
@@ -2662,6 +2667,7 @@ def run_mocker_synthetic_trace_replay(
     sla_e2e_ms: Optional[float] = None,
     scaling_policy: Optional[Any] = None,
     waiting_policy: Optional[Any] = None,
+    fpm_log: Optional[str | os.PathLike[str]] = None,
 ) -> Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file.
 
@@ -2673,8 +2679,8 @@ def run_mocker_synthetic_trace_replay(
     ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
     policy in online mode raises ``ValueError``.
 
-    ``waiting_policy`` as in ``run_mocker_trace_replay``: offline aggregated
-    replay without ``replay_concurrency`` only.
+    ``waiting_policy`` and ``fpm_log`` as in ``run_mocker_trace_replay``:
+    offline aggregated replay without ``replay_concurrency`` only.
     """
     ...
 

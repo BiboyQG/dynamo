@@ -11,6 +11,7 @@ mod entrypoints;
 pub(crate) mod events;
 mod executor;
 pub(crate) mod extensions;
+mod fpm_log;
 mod progress;
 pub(crate) mod runtime_utils;
 pub(crate) mod scaling;
@@ -31,5 +32,7 @@ pub(crate) use entrypoints::{
 
 #[cfg(test)]
 mod firewall_tests;
+#[cfg(test)]
+mod fpm_log_tests;
 #[cfg(test)]
 mod waiting_policy_tests;

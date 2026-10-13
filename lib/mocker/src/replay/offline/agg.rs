@@ -14,6 +14,7 @@ use super::core::{
 use super::events::{SimulationEvent, SimulationWorkerStage};
 #[cfg(test)]
 use super::extensions::kv_router::AggRuntime;
+use super::fpm_log::FpmLog;
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
     next_timestamp as choose_next_timestamp, pop_ready_scaling_tick, pop_ready_worker_completion,
@@ -45,6 +46,7 @@ use rustc_hash::FxHashMap;
 #[cfg(test)]
 use std::collections::HashMap;
 use std::collections::{BinaryHeap, VecDeque};
+use std::path::Path;
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -133,9 +135,12 @@ where
     max_sim_time_ms: Option<f64>,
     /// Optional scaling component. When set, `run()` seeds recurring `ScalingTick` events.
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
-    /// Whether to retain the latest FPM snapshot per worker/rank. Only the planner
-    /// consumes them, so the plain `run()` path leaves this `false`.
+    /// Whether to retain the latest FPM snapshot per worker/rank for the next
+    /// scaling tick. Only a scaling policy needs them, so the plain `run()`
+    /// path leaves this `false`; the FPM log below is independent of it.
     collect_fpm: bool,
+    /// Optional per-iteration log of every worker's forward-pass snapshot.
+    fpm_log: Option<FpmLog>,
     #[cfg(test)]
     worker_active_requests: Vec<Vec<Uuid>>,
     #[cfg(test)]
@@ -227,6 +232,7 @@ where
             max_sim_time_ms: None,
             scaling_policy: None,
             collect_fpm: false,
+            fpm_log: None,
             #[cfg(test)]
             worker_active_requests: vec![
                 Vec::new();
@@ -290,6 +296,14 @@ where
         Ok(self)
     }
 
+    /// Log every worker iteration's forward-pass snapshot to `path`, one JSON line each.
+    pub(in crate::replay) fn with_fpm_log(mut self, path: Option<&Path>) -> anyhow::Result<Self> {
+        if let Some(path) = path {
+            self.fpm_log = Some(FpmLog::create(path)?);
+        }
+        Ok(self)
+    }
+
     #[cfg(test)]
     fn with_fpm_capture(mut self) -> Self {
         self.collect_fpm = true;
@@ -335,7 +349,7 @@ where
     }
 
     /// Preserve the live `(worker_id, dp_rank)` identity when forwarding a
-    /// rank-local scheduler snapshot to the scaling policy.
+    /// rank-local scheduler snapshot to the FPM log and the scaling policy.
     fn record_fpm(
         &mut self,
         rank_id: usize,
@@ -346,7 +360,12 @@ where
         })?;
         snapshot.worker_id = worker_id.to_string();
         snapshot.dp_rank = dp_rank;
-        self.fpm_buffer.insert(worker_id, snapshot, self.now_ms);
+        if let Some(log) = self.fpm_log.as_mut() {
+            log.write(self.now_ms, worker_id, &snapshot)?;
+        }
+        if self.collect_fpm {
+            self.fpm_buffer.insert(worker_id, snapshot, self.now_ms);
+        }
         Ok(())
     }
 
@@ -648,7 +667,7 @@ where
         while let Some(payload) = pop_ready_worker_completion(&mut self.events, self.now_ms) {
             debug_assert_eq!(payload.stage, SimulationWorkerStage::Aggregated);
             let payload = self.engine.on_scheduled_completion(payload)?;
-            if self.collect_fpm
+            if (self.collect_fpm || self.fpm_log.is_some())
                 && let Some(fpm) = payload.fpm
             {
                 self.record_fpm(payload.worker_idx, fpm)?;
@@ -715,7 +734,7 @@ where
         self.apply_engine_observations(effects.pass_start_events)?;
         for payload in effects.immediate_completions {
             let payload = self.engine.on_scheduled_completion(payload)?;
-            if self.collect_fpm
+            if (self.collect_fpm || self.fpm_log.is_some())
                 && let Some(fpm) = payload.fpm
             {
                 self.record_fpm(payload.worker_idx, fpm)?;
@@ -1059,6 +1078,9 @@ where
             self.drain_current_timestamp()?;
         }
 
+        if let Some(log) = self.fpm_log.as_mut() {
+            log.flush()?;
+        }
         self.progress.finish();
         Ok((self.collector, self.stats))
     }

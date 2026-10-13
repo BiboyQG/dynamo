@@ -75,6 +75,7 @@ def run_trace_replay(
     benchmark_granularity=8,
     waiting_policy=None,
     waiting_policy_log=None,
+    fpm_log=None,
 ):
     """Run trace replay.
 
@@ -84,6 +85,9 @@ def run_trace_replay(
     or agentic). The report then carries ``waiting_policy_stats``;
     ``waiting_policy_log`` writes one JSON line per policy call. The log file is
     opened before the replay starts, so a rejected call still truncates it.
+    ``fpm_log`` writes one JSON line per worker iteration: the forward-pass
+    snapshot (what was prefilled and decoded, what waited) plus ``now_ms``, the
+    simulated time the iteration ended; same restrictions as ``waiting_policy``.
 
     ``wall_time_ms`` and derived throughput measure Rust runtime construction
     and execution. Planner creation and bootstrap happen before that boundary.
@@ -112,6 +116,7 @@ def run_trace_replay(
         "sla_ttft_ms": sla_ttft_ms,
         "sla_itl_ms": sla_itl_ms,
         "sla_e2e_ms": sla_e2e_ms,
+        "fpm_log": fpm_log,
     }
     if planner_config is not None:
         # Planner replay is offline-only; reject controls the
@@ -199,9 +204,10 @@ def run_synthetic_trace_replay(
     benchmark_granularity=8,
     waiting_policy=None,
     waiting_policy_log=None,
+    fpm_log=None,
 ):
     """Run synthetic replay with the same timing boundary as trace replay.
-    ``waiting_policy`` as in :func:`run_trace_replay`."""
+    ``waiting_policy`` and ``fpm_log`` as in :func:`run_trace_replay`."""
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
@@ -226,6 +232,7 @@ def run_synthetic_trace_replay(
         "sla_ttft_ms": sla_ttft_ms,
         "sla_itl_ms": sla_itl_ms,
         "sla_e2e_ms": sla_e2e_ms,
+        "fpm_log": fpm_log,
     }
     if planner_config is not None:
         if replay_mode != "offline":
