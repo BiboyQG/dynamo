@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use dynamo_kv_router::config::KvRouterConfig;
@@ -193,6 +193,7 @@ pub fn simulate_loaded_trace_with_router_mode_and_options_and_scaling_policy(
             sla,
             scaling_policy,
             None,
+            None,
         )
     } else {
         crate::replay::offline::simulate_trace_workload_with_scaling_policy(
@@ -207,6 +208,7 @@ pub fn simulate_loaded_trace_with_router_mode_and_options_and_scaling_policy(
             max_sim_time_ms,
             sla,
             scaling_policy,
+            None,
             None,
         )
     }
@@ -447,6 +449,7 @@ pub fn simulate_trace_file_with_router_mode_and_format(
         sla,
         None,
         None,
+        None,
     )
 }
 
@@ -469,6 +472,7 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
     waiting_policy: Option<WaitingPolicyHandle>,
+    fpm_log: Option<PathBuf>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_replay_args(&args, num_workers, router_mode, scaling_policy.is_some())?;
@@ -480,6 +484,10 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
         anyhow::ensure!(
             waiting_policy.is_none(),
             "waiting_policy replay only supports standard Mooncake traces"
+        );
+        anyhow::ensure!(
+            fpm_log.is_none(),
+            "fpm_log replay only supports standard Mooncake traces"
         );
         let trace =
             load_agentic_trace_from_file(trace_path, trace_block_size, arrival_speedup_ratio)?;
@@ -504,6 +512,9 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
     if trace_accumulates_session_deltas(trace_format) && waiting_policy.is_some() {
         bail!("waiting_policy replay does not support mooncake-delta traces");
     }
+    if trace_accumulates_session_deltas(trace_format) && fpm_log.is_some() {
+        bail!("fpm_log replay does not support mooncake-delta traces");
+    }
     let trace = load_trace_from_file(
         trace_path,
         trace_block_size,
@@ -527,6 +538,7 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
             sla,
             scaling_policy,
             waiting_policy,
+            fpm_log,
         )?
     } else if trace_accumulates_session_deltas(trace_format) {
         crate::replay::offline::simulate_trace_workload_accumulating_deltas(
@@ -554,6 +566,7 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
             sla,
             scaling_policy,
             waiting_policy,
+            fpm_log,
         )?
     };
     Ok(report)
@@ -870,6 +883,7 @@ pub fn simulate_trace_requests_with_router_mode(
         sla,
         None,
         None,
+        None,
     )
 }
 
@@ -886,6 +900,7 @@ pub fn simulate_trace_requests_with_router_mode_and_scaling_policy(
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
     waiting_policy: Option<WaitingPolicyHandle>,
+    fpm_log: Option<PathBuf>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_replay_args(&args, num_workers, router_mode, scaling_policy.is_some())?;
@@ -906,6 +921,7 @@ pub fn simulate_trace_requests_with_router_mode_and_scaling_policy(
         sla,
         scaling_policy,
         waiting_policy,
+        fpm_log,
     )?;
     Ok(report)
 }
@@ -1689,6 +1705,7 @@ fn simulate_trace_workload_with_router_mode_and_options(
         sla,
         None,
         None,
+        None,
     )
 }
 
@@ -1706,6 +1723,7 @@ pub fn simulate_trace_workload_with_router_mode_and_options_and_scaling_policy(
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
     waiting_policy: Option<WaitingPolicyHandle>,
+    fpm_log: Option<PathBuf>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_replay_args(&args, num_workers, router_mode, scaling_policy.is_some())?;
@@ -1722,6 +1740,7 @@ pub fn simulate_trace_workload_with_router_mode_and_options_and_scaling_policy(
         sla,
         scaling_policy,
         waiting_policy,
+        fpm_log,
     )?;
     Ok(report)
 }

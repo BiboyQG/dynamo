@@ -886,7 +886,7 @@ impl MockEngineArgs {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, scaling_policy=None, waiting_policy=None))]
+#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, scaling_policy=None, waiting_policy=None, fpm_log=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -915,6 +915,7 @@ pub fn run_mocker_trace_replay(
     sla_e2e_ms: Option<f64>,
     scaling_policy: Option<Py<PyAny>>,
     waiting_policy: Option<Py<PyAny>>,
+    fpm_log: Option<PathBuf>,
 ) -> PyResult<PyObject> {
     let args_selection = load_replay_args_selection(
         py,
@@ -946,6 +947,28 @@ pub fn run_mocker_trace_replay(
         if matches!(args_selection, ReplayArgsSelection::Disagg(_)) {
             return Err(PyValueError::new_err(
                 "waiting_policy only supports aggregated replay",
+            ));
+        }
+    }
+    if fpm_log.is_some() {
+        if replay_mode != "offline" {
+            return Err(PyValueError::new_err(
+                "fpm_log only supports replay_mode='offline'",
+            ));
+        }
+        if replay_concurrency.is_some() {
+            return Err(PyValueError::new_err(
+                "fpm_log does not support replay_concurrency",
+            ));
+        }
+        if trace_format != dynamo_mocker::loadgen::TraceFileFormat::Mooncake {
+            return Err(PyValueError::new_err(
+                "fpm_log only supports trace_format='mooncake'",
+            ));
+        }
+        if matches!(args_selection, ReplayArgsSelection::Disagg(_)) {
+            return Err(PyValueError::new_err(
+                "fpm_log only supports aggregated replay",
             ));
         }
     }
@@ -1056,6 +1079,7 @@ pub fn run_mocker_trace_replay(
                     sla,
                     scaling_policy.take(),
                     waiting_policy.take(),
+                    fpm_log.clone(),
                 )
             }
             ReplayDispatch::AggregatedOnlineConcurrency(args, max_in_flight) => {
@@ -1332,7 +1356,7 @@ fn write_per_request_jsonl(
 }
 
 #[pyfunction]
-#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, scaling_policy=None, waiting_policy=None))]
+#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, scaling_policy=None, waiting_policy=None, fpm_log=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_synthetic_trace_replay(
     py: Python<'_>,
@@ -1364,6 +1388,7 @@ pub fn run_mocker_synthetic_trace_replay(
     sla_e2e_ms: Option<f64>,
     scaling_policy: Option<Py<PyAny>>,
     waiting_policy: Option<Py<PyAny>>,
+    fpm_log: Option<PathBuf>,
 ) -> PyResult<PyObject> {
     if scaling_policy.is_some() && replay_mode != "offline" {
         return Err(PyValueError::new_err(
@@ -1373,6 +1398,11 @@ pub fn run_mocker_synthetic_trace_replay(
     if waiting_policy.is_some() && replay_mode != "offline" {
         return Err(PyValueError::new_err(
             "waiting_policy only supports replay_mode='offline'",
+        ));
+    }
+    if fpm_log.is_some() && replay_mode != "offline" {
+        return Err(PyValueError::new_err(
+            "fpm_log only supports replay_mode='offline'",
         ));
     }
     validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
@@ -1409,6 +1439,18 @@ pub fn run_mocker_synthetic_trace_replay(
         if matches!(args_selection, ReplayArgsSelection::Disagg(_)) {
             return Err(PyValueError::new_err(
                 "waiting_policy only supports aggregated replay",
+            ));
+        }
+    }
+    if fpm_log.is_some() {
+        if replay_concurrency.is_some() {
+            return Err(PyValueError::new_err(
+                "fpm_log does not support replay_concurrency",
+            ));
+        }
+        if matches!(args_selection, ReplayArgsSelection::Disagg(_)) {
+            return Err(PyValueError::new_err(
+                "fpm_log only supports aggregated replay",
             ));
         }
     }
@@ -1478,6 +1520,7 @@ pub fn run_mocker_synthetic_trace_replay(
                             sla,
                             scaling_policy.take(),
                             waiting_policy.take(),
+                            fpm_log.clone(),
                         )
                     }
                     ("online", Some(max_in_flight)) => {
@@ -1583,6 +1626,7 @@ pub fn run_mocker_synthetic_trace_replay(
                     sla,
                     scaling_policy.take(),
                     waiting_policy.take(),
+                    fpm_log.clone(),
                 ),
                 ("online", Some(max_in_flight)) => {
                     dynamo_mocker::replay::simulate_concurrency_live_requests_with_router_mode_and_options(
@@ -2345,26 +2389,7 @@ fn fpm_snapshots_to_json(
 ) -> Vec<serde_json::Value> {
     snapshots
         .into_iter()
-        .map(|(worker_id, fpm)| {
-            json!({
-                "worker_id": worker_id,
-                "dp_rank": fpm.dp_rank,
-                "wall_time": fpm.wall_time_secs,
-                "num_prefill_requests": fpm.num_prefill_requests,
-                "sum_prefill_tokens": fpm.sum_prefill_tokens,
-                "var_prefill_length": fpm.var_prefill_length,
-                "sum_prefill_kv_tokens": fpm.sum_prefill_kv_tokens,
-                "num_decode_requests": fpm.num_decode_requests,
-                "sum_decode_kv_tokens": fpm.sum_decode_kv_tokens,
-                "var_decode_kv_tokens": fpm.var_decode_kv_tokens,
-                "num_queued_prefill": fpm.num_queued_prefill,
-                "sum_queued_prefill_tokens": fpm.sum_queued_prefill_tokens,
-                "var_queued_prefill_length": fpm.var_queued_prefill_length,
-                "num_queued_decode": fpm.num_queued_decode,
-                "sum_queued_decode_kv_tokens": fpm.sum_queued_decode_kv_tokens,
-                "var_queued_decode_kv_tokens": fpm.var_queued_decode_kv_tokens,
-            })
-        })
+        .map(|(worker_id, fpm)| dynamo_mocker::replay::forward_pass_json(worker_id, &fpm))
         .collect()
 }
 

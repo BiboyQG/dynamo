@@ -43,7 +43,7 @@ fn identity_policy() -> (WaitingPolicyHandle, Arc<Mutex<BTreeSet<u64>>>) {
 }
 
 /// Adds a second worker at the first scaling tick.
-struct AddOneWorker;
+pub(super) struct AddOneWorker;
 
 impl ReplayScalingPolicy for AddOneWorker {
     fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
@@ -61,7 +61,7 @@ impl ReplayScalingPolicy for AddOneWorker {
 
 /// Two running requests per worker, so a burst queues on every worker and
 /// the policy is consulted.
-fn vllm_args() -> MockEngineArgs {
+pub(super) fn vllm_args() -> MockEngineArgs {
     MockEngineArgs::builder()
         .block_size(4)
         .num_gpu_blocks(64)
@@ -74,7 +74,7 @@ fn vllm_args() -> MockEngineArgs {
 }
 
 /// `n` requests one millisecond apart; three prompt families give prefix reuse.
-fn burst(n: usize) -> Vec<DirectRequest> {
+pub(super) fn burst(n: usize) -> Vec<DirectRequest> {
     (0..n)
         .map(|i| {
             let token = [1, 2, 3][i % 3];
@@ -110,6 +110,7 @@ fn replay(
         SlaThresholds::default(),
         scaling_policy,
         waiting_policy,
+        None,
     )
 }
 
@@ -129,7 +130,7 @@ fn round_floats(value: &mut serde_json::Value) {
 
 /// The summary without the replay wall time and the rates derived from it,
 /// plus the per-request records.
-fn comparable(report: &TraceSimulationReport) -> (serde_json::Value, serde_json::Value) {
+pub(super) fn comparable(report: &TraceSimulationReport) -> (serde_json::Value, serde_json::Value) {
     let mut summary = serde_json::to_value(report).unwrap();
     round_floats(&mut summary);
     for key in [
@@ -158,7 +159,7 @@ fn comparable(report: &TraceSimulationReport) -> (serde_json::Value, serde_json:
 }
 
 /// `n` two-turn sessions one millisecond apart; the second turn extends the first.
-fn sessions(n: usize) -> Trace {
+pub(super) fn sessions(n: usize) -> Trace {
     Trace {
         block_size: 4,
         sessions: (0..n)
@@ -190,7 +191,7 @@ fn sessions(n: usize) -> Trace {
 }
 
 /// `burst(n)` as a single-turn Mooncake trace file (trace block size 4).
-fn mooncake_file(n: usize) -> NamedTempFile {
+pub(super) fn mooncake_file(n: usize) -> NamedTempFile {
     let mut file = NamedTempFile::new().unwrap();
     for i in 0..n {
         let family = (i % 3) as u64 * 100;
@@ -373,6 +374,7 @@ fn requests_entrypoint_consults_the_policy() {
         SlaThresholds::default(),
         None,
         Some(policy),
+        None,
     )
     .unwrap();
     assert_eq!(native.request_counts.completed_requests, 12);
@@ -411,6 +413,7 @@ fn workload_entrypoint_consults_the_policy() {
             SlaThresholds::default(),
             None,
             Some(policy),
+            None,
         )
         .unwrap();
     assert_eq!(native.request_counts.completed_requests, 16);
@@ -440,6 +443,7 @@ fn trace_file_entrypoint_consults_the_policy() {
             SlaThresholds::default(),
             None,
             waiting_policy,
+            None,
         )
         .unwrap()
     };
@@ -482,6 +486,7 @@ fn kv_router_runtimes_install_the_policy() {
         SlaThresholds::default(),
         None,
         Some(policy),
+        None,
     )
     .unwrap();
     assert_eq!(report.request_counts.completed_requests, 24);
@@ -552,6 +557,7 @@ fn agentic_and_delta_trace_formats_reject_the_policy() {
                 SlaThresholds::default(),
                 None,
                 Some(policy),
+                None,
             )
             .unwrap_err();
         assert!(err.to_string().contains(message), "{format:?}: {err:#}");

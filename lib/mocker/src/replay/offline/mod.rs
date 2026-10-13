@@ -11,6 +11,7 @@ mod entrypoints;
 pub(crate) mod events;
 mod executor;
 pub(crate) mod extensions;
+mod fpm_log;
 mod progress;
 pub(crate) mod runtime_utils;
 pub(crate) mod scaling;
@@ -28,8 +29,11 @@ pub(crate) use entrypoints::{
     simulate_trace_workload_disagg_with_scaling_policy,
     simulate_trace_workload_with_scaling_policy,
 };
+pub use fpm_log::forward_pass_json;
 
 #[cfg(test)]
 mod firewall_tests;
+#[cfg(test)]
+mod fpm_log_tests;
 #[cfg(test)]
 mod waiting_policy_tests;
