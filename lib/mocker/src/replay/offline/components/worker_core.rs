@@ -56,9 +56,10 @@ impl ReplayWorkerCore {
 
     pub(crate) fn receive(
         &mut self,
+        now_ms: f64,
         request: crate::common::protocols::DirectRequest,
     ) -> uuid::Uuid {
-        self.core.receive(request)
+        self.core.receive(now_ms, request)
     }
 
     pub(crate) fn num_requests(&self) -> usize {

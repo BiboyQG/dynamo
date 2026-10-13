@@ -21,7 +21,7 @@ pub struct WaitingRequestView {
     pub queue_index: usize,
     /// Arrival order at this scheduler; the tie key.
     pub submit_seq: u64,
-    /// Virtual time since the request first waited here; not reset by preemption.
+    /// Virtual time since the request reached this worker; not reset by preemption.
     pub wait_ms: f64,
     /// Tokens this scheduler has processed since the request first waited here.
     pub age_tokens: u64,

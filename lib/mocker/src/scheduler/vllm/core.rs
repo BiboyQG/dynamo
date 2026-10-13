@@ -54,8 +54,8 @@ pub(crate) struct VllmRequestState {
     pub(crate) offload_dependency: Option<OffloadDependency>,
     /// Arrival order at this scheduler; the waiting policy's tie key.
     pub(crate) submit_seq: u64,
-    /// Virtual time of the first pass that saw this request waiting. Stamped
-    /// only while a waiting policy is installed.
+    /// Virtual time the request reached this worker (`receive`); `None` only
+    /// for a prefill handoff, which never meets a waiting policy.
     pub(crate) first_seen_ms: Option<f64>,
     /// `SchedulerState::processed_tokens` when the request entered the queue.
     pub(crate) enqueued_at_tokens: u64,
@@ -613,10 +613,12 @@ impl VllmCore {
         Ok(())
     }
 
-    pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
+    /// `now_ms` is when the request reaches this worker; `wait_ms` counts from it.
+    pub(crate) fn receive(&mut self, now_ms: f64, request: DirectRequest) -> Uuid {
         match self
-            .apply_command(SchedulerCommand::Submit(request))
+            .apply_command_effects_at(SchedulerCommand::Submit(request), true, Some(now_ms))
             .expect("ordinary request ID must be unique")
+            .result
         {
             SchedulerCommandResult::Submitted(uuid) => uuid,
             _ => unreachable!("submit command must return a request ID"),
@@ -657,8 +659,10 @@ impl VllmCore {
                 let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
                 request.uuid = Some(uuid);
                 self.validate_request_id(uuid)?;
+                let reached_ms =
+                    reservation_now_ms.expect("a submit carries the time it reaches the worker");
                 Ok(SchedulerCommandEffects::new(
-                    SchedulerCommandResult::Submitted(self.submit(request)?),
+                    SchedulerCommandResult::Submitted(self.submit(request, Some(reached_ms))?),
                 ))
             }
             SchedulerCommand::CancelRequest { request_id } => {
@@ -683,7 +687,7 @@ impl VllmCore {
                 self.validate_request_id(uuid)?;
                 self.source_holds.register(uuid, handoff_id)?;
                 let submitted = self
-                    .submit(request)
+                    .submit(request, reservation_now_ms)
                     .expect("prevalidated handoff request must submit");
                 Ok(SchedulerCommandEffects::new(
                     SchedulerCommandResult::Submitted(submitted),
@@ -911,13 +915,18 @@ impl VllmCore {
         max_output_tokens.min(kv_remaining).min(model_remaining)
     }
 
-    fn submit(&mut self, mut request: DirectRequest) -> anyhow::Result<Uuid> {
+    fn submit(
+        &mut self,
+        mut request: DirectRequest,
+        reached_ms: Option<f64>,
+    ) -> anyhow::Result<Uuid> {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         request.uuid = Some(uuid);
         if self.state.requests.contains_key(&uuid) {
             anyhow::bail!("request {uuid} is already active");
         }
-        let request = self.make_request_state(request, RequestStatus::Waiting);
+        let mut request = self.make_request_state(request, RequestStatus::Waiting);
+        request.first_seen_ms = reached_ms;
         if policy::should_reject_for_model_len(
             self.args.scheduling_policy(),
             &request.sequence,
@@ -1783,14 +1792,6 @@ impl VllmCore {
             .copied()
             .filter(|uuid| self.state.is_live_waiting(*uuid))
             .collect();
-        for uuid in &live {
-            self.state
-                .requests
-                .get_mut(uuid)
-                .expect("live waiting request")
-                .first_seen_ms
-                .get_or_insert(now_ms);
-        }
         // Pending destinations exist only on disaggregated decode workers,
         // which `set_waiting_policy` refuses.
         debug_assert!(!self.pending_destinations.has_pending());
@@ -1862,7 +1863,7 @@ impl VllmCore {
         WaitingRequestView {
             queue_index,
             submit_seq: request.submit_seq,
-            wait_ms: now_ms - request.first_seen_ms.expect("stamped at pass start"),
+            wait_ms: now_ms - request.first_seen_ms.expect("stamped at submit"),
             age_tokens: self.state.processed_tokens - request.enqueued_at_tokens,
             prompt_tokens: request.sequence.num_input_tokens(),
             generated_tokens: request.sequence.generated_tokens(),

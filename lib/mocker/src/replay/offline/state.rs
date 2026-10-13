@@ -325,13 +325,13 @@ impl OfflineWorkerState {
         self.in_flight
     }
 
-    pub(crate) fn receive_request(&mut self, mut request: DirectRequest) {
+    pub(crate) fn receive_request(&mut self, now_ms: f64, mut request: DirectRequest) {
         self.in_flight = self
             .in_flight
             .checked_add(1)
             .expect("offline worker in-flight request count overflow");
         request.dp_rank = self.dp_rank;
-        self.core.receive(request);
+        self.core.receive(now_ms, request);
     }
 
     pub(crate) fn apply_command(
@@ -544,7 +544,7 @@ mod tests {
     fn request_cancellation_releases_offline_in_flight_slot() {
         let mut worker = worker(EngineType::Vllm, WorkerType::Aggregated, 8);
         let request_id = Uuid::from_u128(850);
-        worker.receive_request(request(request_id.as_u128(), 8));
+        worker.receive_request(0.0, request(request_id.as_u128(), 8));
         assert_eq!(worker.in_flight(), 1);
 
         assert_eq!(
@@ -584,7 +584,7 @@ mod tests {
             }
             let mut worker =
                 OfflineWorkerState::new_with_rank(3, 7, 3, builder.build().unwrap(), true);
-            worker.receive_request(request(900 + engine_type as u128, 8));
+            worker.receive_request(0.0, request(900 + engine_type as u128, 8));
 
             let mut now_ms = 0.0;
             let mut events = Vec::new();

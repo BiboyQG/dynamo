@@ -376,7 +376,7 @@ where
         uuid: Uuid,
         worker_idx: usize,
     ) -> anyhow::Result<()> {
-        self.engine.dispatch(worker_idx, request)?;
+        self.engine.dispatch(worker_idx, self.now_ms, request)?;
         self.record_dispatch(uuid, worker_idx);
         // Aggregated replay uses a single pool. Treat the assignment as the
         // decode_worker_idx so per-request records consistently carry the

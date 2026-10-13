@@ -267,12 +267,15 @@ mod vllm {
                 .unwrap();
             let mut core = VllmCore::new(args);
             let seed = Uuid::from_u128(101);
-            core.receive(DirectRequest {
-                tokens: (0..8).collect(),
-                max_output_tokens: 1,
-                uuid: Some(seed),
-                ..Default::default()
-            });
+            core.receive(
+                0.0,
+                DirectRequest {
+                    tokens: (0..8).collect(),
+                    max_output_tokens: 1,
+                    uuid: Some(seed),
+                    ..Default::default()
+                },
+            );
 
             let mut collector = crate::replay::TraceCollector::default();
             let first = core.execute_pass(&mut collector, 0.0);
@@ -289,12 +292,15 @@ mod vllm {
             assert!(!core.state().requests.contains_key(&seed));
 
             let repeated = Uuid::from_u128(102);
-            core.receive(DirectRequest {
-                tokens: (0..8).collect(),
-                max_output_tokens: 1,
-                uuid: Some(repeated),
-                ..Default::default()
-            });
+            core.receive(
+                0.0,
+                DirectRequest {
+                    tokens: (0..8).collect(),
+                    max_output_tokens: 1,
+                    uuid: Some(repeated),
+                    ..Default::default()
+                },
+            );
             let pass = core.execute_pass(&mut collector, now_ms);
             let reused_tokens = pass
                 .admissions
@@ -336,12 +342,15 @@ mod vllm {
             .unwrap();
         let mut core = VllmCore::new_with_kv_capture(args, 1);
         let uuid = Uuid::from_u128(103);
-        core.receive(DirectRequest {
-            tokens: (0..8).collect(),
-            max_output_tokens: 1,
-            uuid: Some(uuid),
-            ..Default::default()
-        });
+        core.receive(
+            0.0,
+            DirectRequest {
+                tokens: (0..8).collect(),
+                max_output_tokens: 1,
+                uuid: Some(uuid),
+                ..Default::default()
+            },
+        );
 
         let probe = ActiveSequence::new((0..8).collect(), 1, Some(4), true, false);
         let mut collector = crate::replay::TraceCollector::default();
@@ -394,12 +403,15 @@ mod vllm {
         let first_uuid = Uuid::from_u128(104);
         let second_uuid = Uuid::from_u128(105);
         for uuid in [first_uuid, second_uuid] {
-            core.receive(DirectRequest {
-                tokens: (0..8).collect(),
-                max_output_tokens: 2,
-                uuid: Some(uuid),
-                ..Default::default()
-            });
+            core.receive(
+                0.0,
+                DirectRequest {
+                    tokens: (0..8).collect(),
+                    max_output_tokens: 2,
+                    uuid: Some(uuid),
+                    ..Default::default()
+                },
+            );
         }
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -453,13 +465,16 @@ mod vllm {
             .unwrap();
         let mut core = VllmCore::new_with_kv_capture(args, 1);
         let running = Uuid::from_u128(106);
-        core.receive(DirectRequest {
-            tokens: vec![0, 1, 2],
-            max_output_tokens: 2,
-            output_token_ids: Some(vec![3, 9]),
-            uuid: Some(running),
-            ..Default::default()
-        });
+        core.receive(
+            0.0,
+            DirectRequest {
+                tokens: vec![0, 1, 2],
+                max_output_tokens: 2,
+                output_token_ids: Some(vec![3, 9]),
+                uuid: Some(running),
+                ..Default::default()
+            },
+        );
 
         let mut collector = crate::replay::TraceCollector::default();
         let first = core.execute_pass(&mut collector, 0.0);
@@ -468,12 +483,15 @@ mod vllm {
         assert_eq!(running_request.sequence.len(), 4);
 
         let waiting = Uuid::from_u128(107);
-        core.receive(DirectRequest {
-            tokens: vec![0, 1, 2, 3, 4],
-            max_output_tokens: 1,
-            uuid: Some(waiting),
-            ..Default::default()
-        });
+        core.receive(
+            0.0,
+            DirectRequest {
+                tokens: vec![0, 1, 2, 3, 4],
+                max_output_tokens: 1,
+                uuid: Some(waiting),
+                ..Default::default()
+            },
+        );
         let second = core.execute_pass(&mut collector, first.end_ms);
         let admission = second
             .admissions
@@ -513,13 +531,16 @@ mod vllm {
         let first = Uuid::from_u128(108);
         let second = Uuid::from_u128(109);
         for (uuid, base) in [(first, 0), (second, 100)] {
-            core.receive(DirectRequest {
-                tokens: (base..base + 4).collect(),
-                max_output_tokens: 3,
-                output_token_ids: Some(vec![base + 4, base + 5, base + 6]),
-                uuid: Some(uuid),
-                ..Default::default()
-            });
+            core.receive(
+                0.0,
+                DirectRequest {
+                    tokens: (base..base + 4).collect(),
+                    max_output_tokens: 3,
+                    output_token_ids: Some(vec![base + 4, base + 5, base + 6]),
+                    uuid: Some(uuid),
+                    ..Default::default()
+                },
+            );
         }
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -578,13 +599,16 @@ mod vllm {
         let mut collector = crate::replay::TraceCollector::default();
 
         let seed = Uuid::from_u128(110);
-        core.receive(DirectRequest {
-            tokens: (0..8).collect(),
-            max_output_tokens: 1,
-            output_token_ids: Some(vec![8]),
-            uuid: Some(seed),
-            ..Default::default()
-        });
+        core.receive(
+            0.0,
+            DirectRequest {
+                tokens: (0..8).collect(),
+                max_output_tokens: 1,
+                output_token_ids: Some(vec![8]),
+                uuid: Some(seed),
+                ..Default::default()
+            },
+        );
         let seed_pass = core.execute_pass(&mut collector, 0.0);
         assert!(
             seed_pass.output_signals.iter().any(|signal| {
@@ -603,13 +627,16 @@ mod vllm {
         // seed tail. If the terminal sample above acquired a dangling partial
         // slot, it would also evict the reusable seed head.
         let unrelated = Uuid::from_u128(111);
-        core.receive(DirectRequest {
-            tokens: (100..104).collect(),
-            max_output_tokens: 1,
-            output_token_ids: Some(vec![104]),
-            uuid: Some(unrelated),
-            ..Default::default()
-        });
+        core.receive(
+            0.0,
+            DirectRequest {
+                tokens: (100..104).collect(),
+                max_output_tokens: 1,
+                output_token_ids: Some(vec![104]),
+                uuid: Some(unrelated),
+                ..Default::default()
+            },
+        );
         let unrelated_pass = core.execute_pass(&mut collector, seed_pass.end_ms + 1.0);
         assert!(
             unrelated_pass
@@ -619,13 +646,16 @@ mod vllm {
         );
 
         let probe = Uuid::from_u128(112);
-        core.receive(DirectRequest {
-            tokens: (0..5).collect(),
-            max_output_tokens: 1,
-            output_token_ids: Some(vec![5]),
-            uuid: Some(probe),
-            ..Default::default()
-        });
+        core.receive(
+            0.0,
+            DirectRequest {
+                tokens: (0..5).collect(),
+                max_output_tokens: 1,
+                output_token_ids: Some(vec![5]),
+                uuid: Some(probe),
+                ..Default::default()
+            },
+        );
         let probe_pass = core.execute_pass(&mut collector, unrelated_pass.end_ms + 1.0);
         let admission = probe_pass
             .admissions
@@ -665,13 +695,16 @@ mod vllm {
             .unwrap();
         let mut core = VllmCore::new(args);
         let uuid = Uuid::from_u128(1);
-        core.receive(DirectRequest {
-            tokens: (0..9).collect(),
-            max_output_tokens: 1,
-            uuid: Some(uuid),
-            dp_rank: 0,
-            ..Default::default()
-        });
+        core.receive(
+            0.0,
+            DirectRequest {
+                tokens: (0..9).collect(),
+                max_output_tokens: 1,
+                uuid: Some(uuid),
+                dp_rank: 0,
+                ..Default::default()
+            },
+        );
 
         let mut collector = crate::replay::TraceCollector::default();
         let pass = core.execute_pass(&mut collector, 0.0);
@@ -700,13 +733,16 @@ mod vllm {
             .unwrap();
         let mut core = VllmCore::new(args);
         let uuid = Uuid::from_u128(2);
-        core.receive(DirectRequest {
-            tokens: (0..7).collect(),
-            max_output_tokens: 4,
-            uuid: Some(uuid),
-            dp_rank: 0,
-            ..Default::default()
-        });
+        core.receive(
+            0.0,
+            DirectRequest {
+                tokens: (0..7).collect(),
+                max_output_tokens: 4,
+                uuid: Some(uuid),
+                dp_rank: 0,
+                ..Default::default()
+            },
+        );
 
         let mut collector = crate::replay::TraceCollector::default();
         let pass = core.execute_pass(&mut collector, 0.0);
@@ -738,13 +774,16 @@ mod vllm {
             .unwrap();
         let mut core = VllmCore::new(args);
         let uuid = Uuid::from_u128(3);
-        core.receive(DirectRequest {
-            tokens: (0..5).collect(),
-            max_output_tokens: 8,
-            uuid: Some(uuid),
-            dp_rank: 0,
-            ..Default::default()
-        });
+        core.receive(
+            0.0,
+            DirectRequest {
+                tokens: (0..5).collect(),
+                max_output_tokens: 8,
+                uuid: Some(uuid),
+                dp_rank: 0,
+                ..Default::default()
+            },
+        );
 
         let mut collector = crate::replay::TraceCollector::default();
         let pass = core.execute_pass(&mut collector, 0.0);
@@ -863,15 +902,18 @@ mod trtllm {
     }
 
     fn receive(core: &mut VllmCore, uuid: Uuid, tokens: std::ops::Range<u32>, max_output: usize) {
-        core.receive(DirectRequest {
-            tokens: tokens.collect(),
-            max_output_tokens: max_output,
-            output_token_ids: None,
-            uuid: Some(uuid),
-            dp_rank: 0,
-            arrival_timestamp_ms: None,
-            ..Default::default()
-        });
+        core.receive(
+            0.0,
+            DirectRequest {
+                tokens: tokens.collect(),
+                max_output_tokens: max_output,
+                output_token_ids: None,
+                uuid: Some(uuid),
+                dp_rank: 0,
+                arrival_timestamp_ms: None,
+                ..Default::default()
+            },
+        );
     }
 
     /// Under GUARANTEED_NO_EVICT only the first request — whose

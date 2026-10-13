@@ -224,9 +224,9 @@ pub(crate) enum EngineCore {
 }
 
 impl EngineCore {
-    pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
+    pub(crate) fn receive(&mut self, now_ms: f64, request: DirectRequest) -> Uuid {
         match self {
-            Self::Vllm(core) => core.receive(request),
+            Self::Vllm(core) => core.receive(now_ms, request),
             Self::Sglang(core) => core.receive(request),
         }
     }
@@ -622,7 +622,7 @@ mod tests {
         {
             let mut core = core(engine_type, WorkerType::Aggregated, 16);
             let waiting_id = Uuid::from_u128(20_000 + case as u128);
-            core.receive(request(waiting_id, (0..4).collect()));
+            core.receive(0.0, request(waiting_id, (0..4).collect()));
             assert_eq!(request_metrics(&core).waiting_requests, 1);
             assert_eq!(
                 core.apply_command(SchedulerCommand::CancelRequest {
@@ -643,7 +643,7 @@ mod tests {
             let running_id = Uuid::from_u128(20_100 + case as u128);
             let mut running_request = request(running_id, (100..108).collect());
             running_request.max_output_tokens = 32;
-            core.receive(running_request);
+            core.receive(0.0, running_request);
             core.execute_hidden_pass(0.0);
             assert_eq!(request_metrics(&core).running_requests, 1);
             let active_blocks_before_cancel = request_metrics(&core).active_decode_blocks;
@@ -947,7 +947,7 @@ mod tests {
             assert!(pending_only.admissions.is_empty());
             assert!(pending_only.output_signals.is_empty());
 
-            destination.receive(request(fresh_request, (300..304).collect()));
+            destination.receive(0.0, request(fresh_request, (300..304).collect()));
             let pass = destination.execute_hidden_pass(0.0);
             assert!(pass.admissions.is_empty());
             assert!(pass.output_signals.is_empty());
@@ -1088,7 +1088,7 @@ mod tests {
         let pending_request = Uuid::from_u128(36_903);
         let fresh_request = Uuid::from_u128(36_904);
 
-        destination.receive(request(fresh_request, (200..204).collect()));
+        destination.receive(0.0, request(fresh_request, (200..204).collect()));
 
         assert_eq!(
             destination
@@ -1185,12 +1185,15 @@ mod tests {
             };
             assert!(reserved_occupancy > 0);
 
-            destination.receive(DirectRequest {
-                tokens: (100..108).collect(),
-                max_output_tokens: 8,
-                uuid: Some(Uuid::from_u128(38_200 + case as u128)),
-                ..Default::default()
-            });
+            destination.receive(
+                0.0,
+                DirectRequest {
+                    tokens: (100..108).collect(),
+                    max_output_tokens: 8,
+                    uuid: Some(Uuid::from_u128(38_200 + case as u128)),
+                    ..Default::default()
+                },
+            );
             let pass = destination.execute_hidden_pass(0.0);
             assert_eq!(pass.admissions.len(), 1);
             let before_activation = match &destination {

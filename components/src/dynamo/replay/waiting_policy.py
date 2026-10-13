@@ -25,9 +25,8 @@ wait, and, for a prefix-aware policy, when more than 128 wait.
   (preempted requests first).
 - ``submit_seq``: arrival order at this scheduler, the tie key; a preemption
   keeps it.
-- ``wait_ms``: virtual time since the first pass that saw the request waiting
-  here (up to one pass after arrival on a busy worker); a preemption does not
-  reset it.
+- ``wait_ms``: virtual time since the request reached this worker's queue; a
+  preemption does not reset it.
 - ``age_tokens``: tokens this scheduler processed since the request first
   waited here.
 - ``prompt_tokens``: prompt length.

@@ -44,7 +44,11 @@ pub(crate) trait LiveBoundaryCore {
 
     fn live_is_empty(&self) -> bool;
 
-    fn receive_live_request(&mut self, request: crate::common::protocols::DirectRequest);
+    fn receive_live_request(
+        &mut self,
+        now_ms: f64,
+        request: crate::common::protocols::DirectRequest,
+    );
 
     fn apply_live_command(
         &mut self,
@@ -688,7 +692,7 @@ pub(crate) async fn receive_until_live_schedulable<C: LiveBoundaryCore>(
                 let Some(request) = request else {
                     return false;
                 };
-                core.receive_live_request(request);
+                core.receive_live_request(scheduler_elapsed_ms(scheduler_start), request);
             }
             _ = &mut internal_deadline, if internal_deadline_ms.is_some() => {
                 #[cfg(feature = "kvbm-offload")]
@@ -731,7 +735,7 @@ pub(crate) async fn receive_until_live_schedulable<C: LiveBoundaryCore>(
         let Ok(request) = request_rx.try_recv() else {
             break;
         };
-        core.receive_live_request(request);
+        core.receive_live_request(scheduler_elapsed_ms(scheduler_start), request);
     }
 
     true
@@ -904,7 +908,7 @@ pub(crate) async fn wait_for_live_progress<C: LiveBoundaryCore>(
             let Some(request) = request else {
                 return false;
             };
-            core.receive_live_request(request);
+            core.receive_live_request(scheduler_elapsed_ms(scheduler_start), request);
             true
         }
         _ = &mut internal_deadline => true,

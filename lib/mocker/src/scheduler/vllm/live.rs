@@ -179,8 +179,8 @@ impl LiveBoundaryCore for VllmCore {
         self.is_empty()
     }
 
-    fn receive_live_request(&mut self, request: DirectRequest) {
-        self.receive(request);
+    fn receive_live_request(&mut self, now_ms: f64, request: DirectRequest) {
+        self.receive(now_ms, request);
     }
 
     fn apply_live_command(
