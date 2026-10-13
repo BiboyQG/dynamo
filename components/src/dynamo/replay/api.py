@@ -83,11 +83,11 @@ def run_trace_replay(
     ``dynamo.replay.waiting_policy``) reorders each worker's waiting queue;
     offline aggregated vLLM replay of a Mooncake trace only (not mooncake-delta
     or agentic). The report then carries ``waiting_policy_stats``;
-    ``waiting_policy_log`` writes one JSON line per policy call: the ``ctx``
-    fields that change between passes, the waiting requests as the policy saw
-    them (every field, native order) and the order it chose (``submit_seq``);
-    see ``ScoreOrder``. The log file is opened before the replay starts, so a
-    rejected call still truncates it.
+    ``waiting_policy_log`` writes one JSON line per policy call: the per-pass
+    ``ctx`` fields, the waiting requests as the policy saw them (every field,
+    native order) and the order it chose (``submit_seq``); the engine-argument
+    ``ctx`` fields are not written; see ``ScoreOrder``. The log file is opened
+    before the replay starts, so a rejected call still truncates it.
     ``fpm_log`` writes one JSON line per worker iteration: the forward-pass
     snapshot a scaling policy sees per tick (what was prefilled and decoded,
     what waited) plus ``now_ms``, the simulated time the iteration ended.
@@ -222,7 +222,8 @@ def run_synthetic_trace_replay(
     fpm_log=None,
 ):
     """Run synthetic replay with the same timing boundary as trace replay.
-    ``waiting_policy`` and ``fpm_log`` as in :func:`run_trace_replay`."""
+    ``waiting_policy``, ``waiting_policy_log`` and ``fpm_log`` as in
+    :func:`run_trace_replay`."""
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,

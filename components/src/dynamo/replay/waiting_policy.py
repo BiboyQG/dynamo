@@ -80,13 +80,14 @@ class ScoreOrder:
     indices into ``view["requests"]``.
 
     With a ``decision_log`` (a writable text file) every call appends one JSON
-    line: the ``ctx`` fields that change between passes (``now_ms``,
-    ``worker_id``, ``num_running``, ``waiting_len``, ``free_blocks``), then
-    ``requests``, the waiting requests exactly as the policy received them, in
-    native order with every field, and ``order``, the ``submit_seq`` of each
-    request in the order the policy chose. The constant ``ctx`` fields
-    (``worker_role``, ``max_num_seqs``, ``block_size``, ``num_gpu_blocks``) are
-    not repeated."""
+    line: the per-pass ``ctx`` fields (``now_ms``, ``worker_id``,
+    ``num_running``, ``waiting_len``, ``free_blocks``), then ``requests``, the
+    waiting requests exactly as the policy received them, in native order with
+    every field, and ``order``, the ``submit_seq`` of each request in the order
+    the policy chose. The other ``ctx`` fields (``worker_role``,
+    ``max_num_seqs``, ``block_size``, ``num_gpu_blocks``) are the engine
+    arguments and are not written. ``stats["seconds"]`` covers scoring and the
+    sort, not the log."""
 
     def __init__(self, module: ModuleType, decision_log=None):
         self.score = module.score
@@ -95,7 +96,6 @@ class ScoreOrder:
         self.stats = {"calls": 0, "seconds": 0.0, "max_waiting_len": 0}
 
     def order(self, view: dict) -> list[int]:
-        started = time.perf_counter()
         requests = view.pop("requests")
         ctx = view
         # Copied before scoring: a policy may mutate the dicts it is given.
@@ -105,10 +105,11 @@ class ScoreOrder:
                 "now_ms": ctx["now_ms"],
                 "worker_id": ctx["worker_id"],
                 "num_running": ctx["num_running"],
-                "waiting_len": len(requests),
+                "waiting_len": ctx["waiting_len"],
                 "free_blocks": ctx["free_blocks"],
                 "requests": [dict(request) for request in requests],
             }
+        started = time.perf_counter()
         keyed = []
         for index, request in enumerate(requests):
             submit_seq = request["submit_seq"]
