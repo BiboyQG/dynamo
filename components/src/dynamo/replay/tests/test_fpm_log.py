@@ -3,7 +3,6 @@
 
 """The per-iteration FPM log on the offline aggregated replay."""
 
-import json
 from itertools import pairwise
 
 import pytest
@@ -13,6 +12,7 @@ from dynamo.replay.tests.test_waiting_policy import (
     TRACE_BLOCK_SIZE,
     WALL_TIME_KEYS,
     engine_args,
+    lines,
     rounded,
     write_trace,
 )
@@ -43,10 +43,6 @@ FIELDS = {
     "sum_queued_decode_kv_tokens",
     "var_queued_decode_kv_tokens",
 }
-
-
-def lines(path):
-    return [json.loads(line) for line in path.read_text().splitlines()]
 
 
 def test_one_line_per_iteration_and_the_report_is_unchanged(tmp_path):

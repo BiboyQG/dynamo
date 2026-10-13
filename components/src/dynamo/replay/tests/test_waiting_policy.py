@@ -30,6 +30,25 @@ pytestmark = [
 
 POLICIES = Path(__file__).resolve().parents[1] / "policies"
 TRACE_BLOCK_SIZE = 16
+LOG_KEYS = {
+    "now_ms",
+    "worker_id",
+    "num_running",
+    "waiting_len",
+    "free_blocks",
+    "requests",
+    "order",
+}
+REQUEST_KEYS = {
+    "queue_index",
+    "submit_seq",
+    "wait_ms",
+    "age_tokens",
+    "prompt_tokens",
+    "generated_tokens",
+    "num_preemptions",
+}
+PREFIX_KEYS = REQUEST_KEYS | {"cached_prefix_tokens", "needed_blocks"}
 # Replay wall time and what is derived from it differ run to run.
 WALL_TIME_KEYS = (
     "wall_time_ms",
@@ -88,7 +107,7 @@ def replay(trace, tmp_path, name, **kwargs):
         report_jsonl_path=records_path,
         **kwargs,
     )
-    records = [json.loads(line) for line in records_path.read_text().splitlines()]
+    records = lines(records_path)
     return report, records
 
 
@@ -103,6 +122,10 @@ def seeded_router(tmp_path_factory):
     ]
     if runs[0] != runs[1]:
         pytest.skip("needs bindings built with --features replay-bench")
+
+
+def lines(path):
+    return [json.loads(line) for line in path.read_text().splitlines()]
 
 
 def rounded(value):
@@ -153,10 +176,18 @@ def test_fcfs_matches_native_order(
         *fcfs, single_worker=single
     )
     assert fcfs[0]["waiting_policy_stats"]["calls"] > 0
-    workers_seen = {
-        json.loads(line)["worker_id"] for line in log.read_text().splitlines()
-    }
-    assert workers_seen == set(range(num_workers))
+    rows = lines(log)
+    assert {line["worker_id"] for line in rows} == set(range(num_workers))
+    # Each line is the view the policy saw and the order it chose.
+    for line in rows:
+        assert set(line) == LOG_KEYS
+        assert len(line["requests"]) == line["waiting_len"] >= 2
+        assert all(set(r) == REQUEST_KEYS for r in line["requests"])
+        assert sorted(line["order"]) == sorted(
+            r["submit_seq"] for r in line["requests"]
+        )
+        # fcfs keeps the native order.
+        assert line["order"] == [r["submit_seq"] for r in line["requests"]]
 
 
 def test_spf_reorders_and_is_deterministic(seeded_router, trace, tmp_path):
@@ -286,14 +317,7 @@ def test_report_and_log_do_not_depend_on_the_hash_seed(seeded_router, trace, tmp
         outputs.append((out.read_text(), log.read_text()))
     assert outputs[0] == outputs[1]
     first_line = json.loads(outputs[0][1].splitlines()[0])
-    assert set(first_line) == {
-        "now_ms",
-        "worker_id",
-        "waiting_len",
-        "num_running",
-        "free_blocks",
-        "order",
-    }
+    assert set(first_line) == LOG_KEYS
 
 
 def test_policy_exception_propagates(trace, tmp_path):
@@ -405,6 +429,60 @@ def test_synthetic_unsupported_combinations_are_rejected(kwargs, message):
             arrival_interval_ms=3.0,
             waiting_policy=POLICIES / "fcfs.py",
             **kwargs,
+        )
+
+
+def test_log_carries_prefix_fields_and_the_policy_order(trace, tmp_path):
+    # The log changes nothing: same report as the same policy without a log.
+    plain, _ = replay(trace, tmp_path, "lpm-plain", waiting_policy=POLICIES / "lpm.py")
+    log = tmp_path / "decisions.jsonl"
+    logged, _ = replay(
+        trace,
+        tmp_path,
+        "lpm",
+        waiting_policy=POLICIES / "lpm.py",
+        waiting_policy_log=log,
+    )
+    for key in WALL_TIME_KEYS:
+        plain.pop(key, None)
+        logged.pop(key, None)
+    assert rounded(plain) == rounded(logged)
+    rows = lines(log)
+    assert rows
+    assert all(set(line) == LOG_KEYS for line in rows)
+    assert all(set(r) == PREFIX_KEYS for line in rows for r in line["requests"])
+    # lpm's order among new requests (this trace never preempts): most cached
+    # prefix first, ties by submit_seq.
+    for line in rows:
+        by_seq = {r["submit_seq"]: r for r in line["requests"]}
+        assert sorted(line["order"]) == sorted(by_seq)
+        key = [(-by_seq[seq]["cached_prefix_tokens"], seq) for seq in line["order"]]
+        assert key == sorted(key)
+
+
+def test_log_shows_the_requests_before_the_policy_touched_them(trace, tmp_path):
+    policy = tmp_path / "mutating.py"
+    policy.write_text(
+        "def score(request, ctx):\n"
+        "    request['prompt_tokens'] = -1\n"
+        "    ctx['now_ms'] = -1.0\n"
+        "    return float(request['queue_index'])\n"
+    )
+    log = tmp_path / "decisions.jsonl"
+    replay(trace, tmp_path, "mutating", waiting_policy=policy, waiting_policy_log=log)
+    rows = lines(log)
+    assert rows
+    assert all(r["prompt_tokens"] > 0 for line in rows for r in line["requests"])
+    assert all(line["now_ms"] >= 0 for line in rows)
+    # The line shape, on any build: one worker, a base policy.
+    for line in rows:
+        assert set(line) == LOG_KEYS
+        assert all(set(r) == REQUEST_KEYS for r in line["requests"])
+        assert [r["queue_index"] for r in line["requests"]] == list(
+            range(line["waiting_len"])
+        )
+        assert sorted(line["order"]) == sorted(
+            r["submit_seq"] for r in line["requests"]
         )
 
 
