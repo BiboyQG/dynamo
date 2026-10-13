@@ -29,6 +29,7 @@ pub(crate) use entrypoints::{
     simulate_trace_workload_disagg_with_scaling_policy,
     simulate_trace_workload_with_scaling_policy,
 };
+pub use fpm_log::forward_pass_json;
 
 #[cfg(test)]
 mod firewall_tests;

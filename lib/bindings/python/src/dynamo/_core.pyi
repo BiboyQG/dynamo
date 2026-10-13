@@ -2632,9 +2632,18 @@ def run_mocker_trace_replay(
     aggregated replay of a Mooncake trace without ``replay_concurrency`` only;
     anything else raises ``ValueError``.
 
-    ``fpm_log`` writes one JSON line per worker iteration (the forward-pass
-    snapshot a scaling policy sees, plus ``now_ms``, the simulated time the
-    iteration ended). Same restrictions as ``waiting_policy``.
+    ``fpm_log`` writes one JSON line per worker iteration: the forward-pass
+    snapshot a scaling policy sees per tick plus ``now_ms``, the simulated time
+    the iteration ended. ``wall_time`` is the iteration's simulated duration in
+    seconds; ``worker_id`` is the logical worker and ``dp_rank`` its
+    attention-DP rank (``decode_worker_idx`` in the per-request records is
+    ``worker_id * dp_size + dp_rank``); an attention-DP rank with no work in its
+    group's step logs a line with every count zero. Offline aggregated replay
+    of a standard Mooncake trace without ``replay_concurrency`` only, any
+    engine type. With one worker the log, like a waiting policy, runs the
+    multi-worker runtime (worker indices in the per-request records, last-digit
+    differences in summary means, ``max_sim_time_ms`` stops at the first event
+    past the cap).
     """
     ...
 

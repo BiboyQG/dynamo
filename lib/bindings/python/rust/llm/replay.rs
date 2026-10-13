@@ -2389,26 +2389,7 @@ fn fpm_snapshots_to_json(
 ) -> Vec<serde_json::Value> {
     snapshots
         .into_iter()
-        .map(|(worker_id, fpm)| {
-            json!({
-                "worker_id": worker_id,
-                "dp_rank": fpm.dp_rank,
-                "wall_time": fpm.wall_time_secs,
-                "num_prefill_requests": fpm.num_prefill_requests,
-                "sum_prefill_tokens": fpm.sum_prefill_tokens,
-                "var_prefill_length": fpm.var_prefill_length,
-                "sum_prefill_kv_tokens": fpm.sum_prefill_kv_tokens,
-                "num_decode_requests": fpm.num_decode_requests,
-                "sum_decode_kv_tokens": fpm.sum_decode_kv_tokens,
-                "var_decode_kv_tokens": fpm.var_decode_kv_tokens,
-                "num_queued_prefill": fpm.num_queued_prefill,
-                "sum_queued_prefill_tokens": fpm.sum_queued_prefill_tokens,
-                "var_queued_prefill_length": fpm.var_queued_prefill_length,
-                "num_queued_decode": fpm.num_queued_decode,
-                "sum_queued_decode_kv_tokens": fpm.sum_queued_decode_kv_tokens,
-                "var_queued_decode_kv_tokens": fpm.var_queued_decode_kv_tokens,
-            })
-        })
+        .map(|(worker_id, fpm)| dynamo_mocker::replay::forward_pass_json(worker_id, &fpm))
         .collect()
 }
 

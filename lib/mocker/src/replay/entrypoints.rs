@@ -538,7 +538,7 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
             sla,
             scaling_policy,
             waiting_policy,
-            fpm_log.clone(),
+            fpm_log,
         )?
     } else if trace_accumulates_session_deltas(trace_format) {
         crate::replay::offline::simulate_trace_workload_accumulating_deltas(
@@ -566,7 +566,7 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
             sla,
             scaling_policy,
             waiting_policy,
-            fpm_log.clone(),
+            fpm_log,
         )?
     };
     Ok(report)

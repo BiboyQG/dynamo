@@ -117,7 +117,7 @@ fn replay(
 /// Round to a nanosecond: the summary means are summed in uuid-hash order,
 /// and file-loaded or workload requests get fresh uuids on every run without
 /// replay-bench, so the last bits of a mean can differ between two runs.
-pub(super) fn round_floats(value: &mut serde_json::Value) {
+fn round_floats(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Number(n) if n.is_f64() => {
             *value = serde_json::json!((n.as_f64().unwrap() * 1e6).round() / 1e6);

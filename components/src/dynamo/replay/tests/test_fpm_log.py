@@ -13,6 +13,7 @@ from dynamo.replay.tests.test_waiting_policy import (
     TRACE_BLOCK_SIZE,
     WALL_TIME_KEYS,
     engine_args,
+    rounded,
     write_trace,
 )
 
@@ -49,17 +50,18 @@ def lines(path):
 
 
 def test_one_line_per_iteration_and_the_report_is_unchanged(tmp_path):
+    # No prefix caching, so every prompt token is prefilled exactly once.
     trace = write_trace(tmp_path / "trace.jsonl")
     plain = run_trace_replay(
         trace,
-        extra_engine_args=engine_args(),
+        extra_engine_args=engine_args(enable_prefix_caching=False),
         trace_block_size=TRACE_BLOCK_SIZE,
         num_workers=2,
     )
     log = tmp_path / "workers.jsonl"
     logged = run_trace_replay(
         trace,
-        extra_engine_args=engine_args(),
+        extra_engine_args=engine_args(enable_prefix_caching=False),
         trace_block_size=TRACE_BLOCK_SIZE,
         num_workers=2,
         fpm_log=log,
@@ -67,20 +69,25 @@ def test_one_line_per_iteration_and_the_report_is_unchanged(tmp_path):
     for key in WALL_TIME_KEYS:
         plain.pop(key, None)
         logged.pop(key, None)
-    assert plain == logged
+    assert rounded(plain) == rounded(logged)
 
     rows = lines(log)
     assert rows
     assert all(set(row) == FIELDS for row in rows)
     assert {row["worker_id"] for row in rows} == {0, 1}
     assert all(a["now_ms"] <= b["now_ms"] for a, b in pairwise(rows))
-    # The first output token comes with the prefill iteration, the rest are
-    # decode iterations; the burst has no preemption.
+    # Every prompt token is prefilled once; the first output token comes with
+    # the prefill iteration and the rest are decode iterations (no preemption).
+    prompt_tokens = sum(64 + 32 * (i % 5) for i in range(120))
     output_tokens = sum(8 + i % 5 for i in range(120))
+    assert sum(row["sum_prefill_tokens"] for row in rows) == prompt_tokens
     assert sum(row["num_decode_requests"] for row in rows) == output_tokens - 120
 
 
-def test_synthetic_replay_logs(tmp_path):
+@pytest.mark.parametrize("turns_per_session", [1, 2])
+def test_synthetic_replay_logs(tmp_path, turns_per_session):
+    # One turn goes through the bindings' requests arm, two turns through the
+    # workload arm.
     log = tmp_path / "workers.jsonl"
     report = run_synthetic_trace_replay(
         64,
@@ -89,11 +96,40 @@ def test_synthetic_replay_logs(tmp_path):
         extra_engine_args=engine_args(),
         num_workers=2,
         arrival_interval_ms=5.0,
+        turns_per_session=turns_per_session,
         fpm_log=log,
     )
-    assert report["completed_requests"] == 20
+    assert report["completed_requests"] == 20 * turns_per_session
     rows = lines(log)
-    assert sum(row["num_decode_requests"] for row in rows) == 20 * 3
+    assert sum(row["num_decode_requests"] for row in rows) == 20 * turns_per_session * 3
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"replay_mode": "online"}, "fpm_log only supports replay_mode='offline'"),
+        ({"replay_concurrency": 4}, "fpm_log does not support replay_concurrency"),
+        (
+            {
+                "extra_engine_args": None,
+                "prefill_engine_args": engine_args(worker_type="prefill"),
+                "decode_engine_args": engine_args(worker_type="decode"),
+            },
+            "fpm_log only supports aggregated replay",
+        ),
+    ],
+)
+def test_synthetic_rejected_combinations(tmp_path, kwargs, message):
+    kwargs.setdefault("extra_engine_args", engine_args())
+    with pytest.raises(ValueError, match=message):
+        run_synthetic_trace_replay(
+            64,
+            4,
+            20,
+            arrival_interval_ms=5.0,
+            fpm_log=tmp_path / "workers.jsonl",
+            **kwargs,
+        )
 
 
 @pytest.mark.parametrize(

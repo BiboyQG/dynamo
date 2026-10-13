@@ -86,8 +86,20 @@ def run_trace_replay(
     ``waiting_policy_log`` writes one JSON line per policy call. The log file is
     opened before the replay starts, so a rejected call still truncates it.
     ``fpm_log`` writes one JSON line per worker iteration: the forward-pass
-    snapshot (what was prefilled and decoded, what waited) plus ``now_ms``, the
-    simulated time the iteration ended; same restrictions as ``waiting_policy``.
+    snapshot a scaling policy sees per tick (what was prefilled and decoded,
+    what waited) plus ``now_ms``, the simulated time the iteration ended.
+    ``wall_time`` is the iteration's simulated duration in seconds, so it
+    started at ``now_ms - 1000 * wall_time``; ``worker_id`` is the logical
+    worker and ``dp_rank`` its attention-DP rank, and ``decode_worker_idx`` in
+    the per-request records (like ``worker_id`` in the waiting-policy log) is
+    ``worker_id * dp_size + dp_rank``. With attention DP, a rank with no work
+    in its group's step logs a line with every count zero and the group's
+    ``wall_time``. Offline aggregated replay of a standard Mooncake trace
+    without ``replay_concurrency`` only, any engine type. With one worker the
+    log, like a waiting policy, runs the multi-worker runtime: per-request
+    records carry worker indices, summary means can differ from the one-worker
+    report in the last digits, and ``max_sim_time_ms`` stops at the first
+    event past the cap.
 
     ``wall_time_ms`` and derived throughput measure Rust runtime construction
     and execution. Planner creation and bootstrap happen before that boundary.

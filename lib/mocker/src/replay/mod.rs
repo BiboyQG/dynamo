@@ -118,6 +118,7 @@ pub use entrypoints::{
     simulate_trace_workload_with_router_mode_and_options_and_scaling_policy,
 };
 pub use offline::components::TrafficStats;
+pub use offline::forward_pass_json;
 #[doc(hidden)]
 pub use offline::run_offline_handoff_conformance;
 pub use offline::scaling::{ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot};

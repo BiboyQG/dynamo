@@ -318,7 +318,7 @@ fn trace_file_entrypoint_logs_and_rejects_other_formats() {
 }
 
 #[test]
-fn an_unwritable_path_fails_before_the_replay() {
+fn an_unwritable_path_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("missing").join("workers.jsonl");
     let err = replay(
