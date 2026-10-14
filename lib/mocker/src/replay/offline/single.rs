@@ -179,7 +179,7 @@ impl SingleRuntime {
     fn record_arrival(&mut self, request: DirectRequest, arrival_ms: f64) -> Uuid {
         let input_length = request.tokens.len();
         let output_length = request.max_output_tokens;
-        let uuid = self.worker.receive(request);
+        let uuid = self.worker.receive(arrival_ms, request);
         self.collector
             .on_arrival(uuid, arrival_ms, input_length, output_length);
         uuid
@@ -384,7 +384,7 @@ mod tests {
                 .expect("trace replay requests must have an arrival timestamp");
             let input_length = request.tokens.len();
             let output_length = request.max_output_tokens;
-            let uuid = worker.receive(request);
+            let uuid = worker.receive(arrival_ms, request);
             collector.on_arrival(uuid, arrival_ms, input_length, output_length);
         }
     }
@@ -404,7 +404,7 @@ mod tests {
             request.arrival_timestamp_ms = Some(current_time_ms);
             let input_length = request.tokens.len();
             let output_length = request.max_output_tokens;
-            let uuid = worker.receive(request);
+            let uuid = worker.receive(current_time_ms, request);
             collector.on_arrival(uuid, current_time_ms, input_length, output_length);
         }
     }

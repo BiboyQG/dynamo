@@ -162,7 +162,7 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
                 output_length: ready_turn.request.max_output_tokens,
                 replay_hashes,
             });
-            worker.receive(ready_turn.request);
+            worker.receive(current_time_ms, ready_turn.request);
         }
 
         if worker.is_empty() {

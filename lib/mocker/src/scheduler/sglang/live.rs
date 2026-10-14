@@ -114,7 +114,7 @@ impl LiveBoundaryCore for SglangCore {
         self.is_empty()
     }
 
-    fn receive_live_request(&mut self, request: DirectRequest) {
+    fn receive_live_request(&mut self, _now_ms: f64, request: DirectRequest) {
         self.receive(request);
     }
 

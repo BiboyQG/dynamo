@@ -40,7 +40,7 @@ impl LiveBoundaryCore for FakeCore {
         self.live_pass_limit.is_none()
     }
 
-    fn receive_live_request(&mut self, _request: DirectRequest) {}
+    fn receive_live_request(&mut self, _now_ms: f64, _request: DirectRequest) {}
 
     fn execute_live_pass(
         &mut self,

@@ -497,11 +497,12 @@ where
     pub(in crate::replay::offline) fn dispatch(
         &mut self,
         rank_id: usize,
+        now_ms: f64,
         request: DirectRequest,
     ) -> anyhow::Result<()> {
         self.worker_mut(rank_id)
             .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?
-            .receive_request(request);
+            .receive_request(now_ms, request);
         self.refresh_rank(rank_id);
         Ok(())
     }
@@ -942,8 +943,8 @@ mod tests {
         let mut engine = ranked_timing_engine(2);
         let fast = Uuid::from_u128(30);
         let slow = Uuid::from_u128(31);
-        engine.dispatch(0, timed_request(fast, 4)).unwrap();
-        engine.dispatch(1, timed_request(slow, 8)).unwrap();
+        engine.dispatch(0, 0.0, timed_request(fast, 4)).unwrap();
+        engine.dispatch(1, 0.0, timed_request(slow, 8)).unwrap();
         let mut collector = TraceCollector::default();
         collector.on_arrival(fast, 0.0, 4, 1);
         collector.on_arrival(slow, 0.0, 8, 1);
@@ -968,7 +969,7 @@ mod tests {
     fn attention_dp_empty_rank_blocks_mid_epoch_arrival() {
         let mut engine = ranked_timing_engine(2);
         let slow = Uuid::from_u128(40);
-        engine.dispatch(0, timed_request(slow, 8)).unwrap();
+        engine.dispatch(0, 0.0, timed_request(slow, 8)).unwrap();
         let mut collector = TraceCollector::default();
         collector.on_arrival(slow, 0.0, 8, 1);
 
@@ -991,7 +992,9 @@ mod tests {
 
         let mid_epoch = Uuid::from_u128(41);
         collector.on_arrival(mid_epoch, 4.0, 4, 1);
-        engine.dispatch(1, timed_request(mid_epoch, 4)).unwrap();
+        engine
+            .dispatch(1, 0.0, timed_request(mid_epoch, 4))
+            .unwrap();
         assert!(
             engine
                 .drive_ready(4.0, Some(&mut collector))
@@ -1017,7 +1020,7 @@ mod tests {
     fn single_rank_group_keeps_local_completion_time() {
         let mut engine = ranked_timing_engine(1);
         let uuid = Uuid::from_u128(50);
-        engine.dispatch(0, timed_request(uuid, 4)).unwrap();
+        engine.dispatch(0, 0.0, timed_request(uuid, 4)).unwrap();
         let mut collector = TraceCollector::default();
         collector.on_arrival(uuid, 0.0, 4, 1);
 
@@ -1040,10 +1043,10 @@ mod tests {
             workers,
         );
         engine
-            .dispatch(0, timed_request(Uuid::from_u128(51), 4))
+            .dispatch(0, 0.0, timed_request(Uuid::from_u128(51), 4))
             .unwrap();
         engine
-            .dispatch(1, timed_request(Uuid::from_u128(52), 4))
+            .dispatch(1, 0.0, timed_request(Uuid::from_u128(52), 4))
             .unwrap();
 
         let first = engine
@@ -1093,7 +1096,7 @@ mod tests {
         let mut collector = TraceCollector::default();
 
         let mut vllm = make_engine(EngineType::Vllm);
-        vllm.dispatch(0, request(Uuid::from_u128(10))).unwrap();
+        vllm.dispatch(0, 0.0, request(Uuid::from_u128(10))).unwrap();
         let vllm_start = vllm.drive_ready(0.0, Some(&mut collector)).unwrap();
         assert!(!vllm_start.pass_start_events.0.is_empty());
         let vllm_end = take_only_completion(vllm_start);
@@ -1101,7 +1104,9 @@ mod tests {
         assert!(vllm_end.fpm.is_some());
 
         let mut sglang = make_engine(EngineType::Sglang);
-        sglang.dispatch(0, request(Uuid::from_u128(11))).unwrap();
+        sglang
+            .dispatch(0, 0.0, request(Uuid::from_u128(11)))
+            .unwrap();
         let sglang_start = sglang.drive_ready(0.0, Some(&mut collector)).unwrap();
         assert!(sglang_start.pass_start_events.0.is_empty());
         let sglang_end = take_only_completion(sglang_start);
@@ -1190,6 +1195,7 @@ mod tests {
         engine
             .dispatch(
                 1,
+                0.0,
                 DirectRequest {
                     tokens: vec![1; 64],
                     max_output_tokens: 8,
@@ -1224,7 +1230,7 @@ mod tests {
         engine
             .worker_mut(new_id)
             .unwrap()
-            .receive_request(timed_request(Uuid::from_u128(60), 4));
+            .receive_request(0.0, timed_request(Uuid::from_u128(60), 4));
         assert!(!engine.ready_groups.contains(&new_id));
         assert!(engine.mark_worker_ready(new_id));
         assert_eq!(engine.active_worker_ids().len(), 2);
@@ -1238,6 +1244,7 @@ mod tests {
         engine
             .dispatch(
                 0,
+                0.0,
                 DirectRequest {
                     tokens: vec![1; 12],
                     max_output_tokens: 1,
@@ -1285,6 +1292,7 @@ mod tests {
         engine
             .dispatch(
                 0,
+                0.0,
                 DirectRequest {
                     tokens: vec![1; 8],
                     max_output_tokens: 1,
@@ -1361,6 +1369,7 @@ mod tests {
         engine
             .dispatch(
                 0,
+                0.0,
                 DirectRequest {
                     tokens: vec![1; 4],
                     max_output_tokens: 1,
@@ -1452,6 +1461,7 @@ mod tests {
         engine
             .dispatch(
                 0,
+                0.0,
                 DirectRequest {
                     tokens: vec![1; 4],
                     max_output_tokens: 1,
