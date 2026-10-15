@@ -4946,6 +4946,9 @@ mod waiting_policy {
             }
             let a = native.execute_pass(&mut native_collector, now_ms);
             let b = reordered.execute_pass(&mut reordered_collector, now_ms);
+            // A dropped request leaves the waiting deque on both paths; its length
+            // sizes the pass's map, whose iteration order the forward-pass log follows.
+            assert_eq!(native.state.waiting.len(), reordered.state.waiting.len());
             now_ms = a.end_ms.max(now_ms + 1.0);
             native_passes.push(a);
             reordered_passes.push(b);
@@ -5307,7 +5310,7 @@ mod waiting_policy {
             fields(&views[1]),
             vec![(Some(8), Some(3)), (Some(0), Some(1))]
         );
-        // The pass-start snapshot equals what admission reused: neither
+        // The view's snapshot equals what admission reused: neither
         // admission in a pass changes the other's hit here.
         assert_eq!(
             admitted(&pass_2),

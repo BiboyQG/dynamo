@@ -54,8 +54,9 @@ pub(crate) struct VllmRequestState {
     pub(crate) offload_dependency: Option<OffloadDependency>,
     /// Arrival order at this scheduler; the waiting policy's tie key.
     pub(crate) submit_seq: u64,
-    /// Virtual time the request reached this worker (`receive`); `None` only
-    /// for a prefill handoff, which never meets a waiting policy.
+    /// Virtual time the request reached this worker (`receive`); `None` only on
+    /// disaggregated workers (prefill handoffs, decode destinations), which
+    /// `set_waiting_policy` refuses.
     pub(crate) first_seen_ms: Option<f64>,
     /// `SchedulerState::processed_tokens` when the request entered the queue.
     pub(crate) enqueued_at_tokens: u64,
@@ -1911,6 +1912,9 @@ impl VllmCore {
         }
         self.source_holds.remove_request(uuid);
         self.active_destination_handoffs.remove_request(uuid);
+        // Leave the waiting deque now: the native head loop pops dead entries lazily, a
+        // policy-chosen order skips them, and the deque length sizes this pass's map.
+        self.state.remove_from_waiting(uuid);
         self.state.complete(&uuid);
         if capacity_improved {
             self.bump_capacity_generation();

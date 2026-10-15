@@ -34,7 +34,8 @@ pub struct WaitingRequestView {
     /// under MTP one more block is recomputed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_prefix_tokens: Option<usize>,
-    /// Blocks admission would allocate; `needed_blocks <= free_blocks` is the admission test.
+    /// Blocks the admission gate requires to be free: the known sequence minus the
+    /// active cached prefix; `needed_blocks <= free_blocks` is the admission test.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub needed_blocks: Option<usize>,
 }
