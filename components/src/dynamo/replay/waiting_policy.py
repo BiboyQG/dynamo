@@ -35,8 +35,9 @@ wait, and, for a prefix-aware policy, when more than 128 wait.
 - ``num_preemptions``: times the request was preempted.
 - ``cached_prefix_tokens`` (``uses_prefix_hits`` only): prefix-cache hit on
   the known sequence, whole blocks, at most its length minus one.
-- ``needed_blocks`` (``uses_prefix_hits`` only): KV blocks admission would
-  allocate; ``needed_blocks <= ctx["free_blocks"]`` is the admission test.
+- ``needed_blocks`` (``uses_prefix_hits`` only): KV blocks the admission gate
+  requires to be free, the known sequence minus the active cached prefix;
+  ``needed_blocks <= ctx["free_blocks"]`` is the admission test.
 
 ``ctx`` fields: ``now_ms``, ``worker_id`` (opaque, one per scheduler),
 ``worker_role`` (``"aggregated"``), ``num_running``, ``max_num_seqs``,

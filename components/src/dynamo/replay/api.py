@@ -100,7 +100,8 @@ def run_trace_replay(
     ``wall_time``. Offline aggregated replay of a standard Mooncake trace
     without ``replay_concurrency`` only, any engine type. With one worker the
     log, like a waiting policy, runs the multi-worker runtime: per-request
-    records carry worker indices, summary means can differ from the one-worker
+    records carry worker indices, the worker-seconds totals
+    (``decode_worker_seconds``, ``gpu_hours``) can differ from the one-worker
     report in the last digits, and ``max_sim_time_ms`` stops at the first
     event past the cap.
 

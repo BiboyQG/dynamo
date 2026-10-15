@@ -123,9 +123,9 @@ pub(super) fn apply_prefix_recompute(
     apply_mtp_prefix_recompute(policy, block_size, mtp_enabled, prefill_cost)
 }
 
-/// Prefix cost after the vLLM recompute rule and the blocks admission would
-/// allocate for the candidate: its known sequence minus the active cached
-/// prefix. Shared by the admission decision and the waiting-policy view.
+/// Prefix cost after the vLLM recompute rule and the blocks the admission gate
+/// requires to be free for the candidate: its known sequence minus the active
+/// cached prefix. Shared by the admission decision and the waiting-policy view.
 pub(super) fn vllm_prefill_need(
     block_size: usize,
     mtp_enabled: bool,
