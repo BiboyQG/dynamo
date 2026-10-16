@@ -78,7 +78,7 @@ def load(path) -> ModuleType:
 
 
 class ScoreOrder:
-    """What the replay binding calls once per pass: scores every waiting
+    """What the replay binding calls, at most once per pass: scores every waiting
     request with the module's ``score`` and returns the admission order as
     indices into ``view["requests"]``.
 
