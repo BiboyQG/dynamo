@@ -14,7 +14,9 @@ live waiting request, after the running requests are scheduled and before the
 admission loop, and tries the requests in ascending score, ties by
 ``submit_seq``; NaN counts as +inf. The admission rules do not change: the first
 request that does not fit stops the loop, nothing is preempted for a candidate,
-and the order is not written back to the queue. The pass keeps the native FCFS
+and the order is not written back to the queue (a fresh request whose known
+sequence exceeds the whole KV pool, possible only on a deployment vLLM refuses,
+is rejected and skipped instead). The pass keeps the native FCFS
 order, without calling the policy, when the loop would not run (a preemption
 this pass, running set full, no token budget), when fewer than two requests
 wait, and, for a prefix-aware policy, when more than 128 wait.

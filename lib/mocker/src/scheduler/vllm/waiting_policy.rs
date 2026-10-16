@@ -7,7 +7,10 @@
 //! of every live waiting request and asks the policy for the order in which
 //! to try them. The admission rules do not change: the first candidate that
 //! does not fit stops the loop, nothing is preempted on a candidate's behalf,
-//! and the order is not written back to the queue.
+//! and the order is not written back to the queue. (A fresh request whose
+//! known sequence exceeds the whole pool, possible only when the pool is
+//! smaller than `max_model_len`, a deployment vLLM refuses, is rejected and
+//! skipped rather than stopping the loop.)
 
 use std::sync::{Arc, Mutex};
 
