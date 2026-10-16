@@ -19,7 +19,7 @@ Offline replay starts in `lib/mocker/src/replay/offline/mod.rs`.
 
 `offline/mod.rs` chooses between three implementations:
 
-- `lib/mocker/src/replay/offline/single.rs` for aggregated replay with `num_workers == 1` and `dp_size == 1` and no scaling or waiting-queue policy
+- `lib/mocker/src/replay/offline/single.rs` for aggregated replay with `num_workers == 1` and `dp_size == 1` and no scaling or waiting-queue policy and no forward-pass log (`fpm_log`)
 - `lib/mocker/src/replay/offline/agg.rs` for everything else, including aggregated multi-worker replay and `kv_router` replay
 - `lib/mocker/src/replay/offline/disagg.rs` for offline disaggregated prefill/decode replay
 
@@ -55,7 +55,8 @@ Offline replay starts in `lib/mocker/src/replay/offline/mod.rs`.
 
 The single-worker path is intentionally simple and used when `num_workers == 1`
 and `dp_size == 1` for vLLM, SGLang, and TRT-LLM engine modes and no scaling or
-waiting-queue policy is installed (either one needs the general harness). Multi-rank
+waiting-queue policy or forward-pass log (`fpm_log`) is set (any of them needs the
+general harness). Multi-rank
 attention-DP uses the general harness so each rank has an independent scheduler
 and KV pool while all ranks still share one deterministic event loop and a
 group-owned iteration clock.

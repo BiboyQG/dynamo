@@ -274,7 +274,7 @@ fn requests_and_workload_entrypoints_log() {
 
 #[test]
 fn trace_file_entrypoint_logs_and_rejects_other_formats() {
-    let file = mooncake_file(24);
+    let file = mooncake_file(24, 1);
     let run = |format, fpm_log| {
         crate::replay::simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
             vllm_args(),

@@ -2629,8 +2629,11 @@ def run_mocker_trace_replay(
     ``waiting_policy`` is an optional object with ``uses_prefix_hits: bool`` and
     ``order(view: dict) -> list[int]`` (see ``dynamo.replay.waiting_policy``),
     called once per scheduler pass to order the waiting queue. Offline
-    aggregated replay of a Mooncake trace without ``replay_concurrency`` only;
-    anything else raises ``ValueError``.
+    aggregated vLLM replay (explicit ``max_num_seqs``) of a Mooncake trace
+    without ``replay_concurrency`` only: online mode, ``replay_concurrency``,
+    other trace formats and disaggregation raise ``ValueError`` here; SGLang,
+    TensorRT-LLM and an unset ``max_num_seqs`` raise ``Exception`` from the
+    scheduler.
 
     ``fpm_log`` writes one JSON line per worker iteration: the forward-pass
     snapshot a scaling policy sees per tick plus ``now_ms``, the simulated time
@@ -2642,8 +2645,8 @@ def run_mocker_trace_replay(
     of a standard Mooncake trace without ``replay_concurrency`` only, any
     engine type. With one worker the log, like a waiting policy, runs the
     multi-worker runtime (worker indices in the per-request records, last-digit
-    differences in summary means, ``max_sim_time_ms`` stops at the first event
-    past the cap).
+    differences in the worker-seconds totals, ``max_sim_time_ms`` stops at the
+    first event past the cap).
     """
     ...
 

@@ -81,8 +81,9 @@ def run_trace_replay(
 
     ``waiting_policy`` (a policy module or its path, see
     ``dynamo.replay.waiting_policy``) reorders each worker's waiting queue;
-    offline aggregated vLLM replay of a Mooncake trace only (not mooncake-delta
-    or agentic). The report then carries ``waiting_policy_stats``;
+    offline aggregated vLLM replay of a Mooncake trace without
+    ``replay_concurrency`` only (not mooncake-delta or agentic). The report then
+    carries ``waiting_policy_stats``;
     ``waiting_policy_log`` writes one JSON line per policy call: the per-pass
     ``ctx`` fields, the waiting requests as the policy saw them (every field,
     native order) and the order it chose (``submit_seq``); the engine-argument
@@ -102,7 +103,9 @@ def run_trace_replay(
     log, like a waiting policy, runs the multi-worker runtime: per-request
     records carry worker indices, the worker-seconds totals
     (``decode_worker_seconds``, ``gpu_hours``) can differ from the one-worker
-    report in the last digits, and ``max_sim_time_ms`` stops at the first
+    report in the last digits (with ``max_sim_time_ms``, by the time from the
+    last completion to the last event at or before the cap, which only the
+    multi-worker runtime charges), and ``max_sim_time_ms`` stops at the first
     event past the cap.
 
     ``wall_time_ms`` and derived throughput measure Rust runtime construction
