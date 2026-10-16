@@ -93,7 +93,8 @@ def run_trace_replay(
     it untouched.
     ``fpm_log`` writes one JSON line per worker iteration: the forward-pass
     snapshot a scaling policy sees per tick (what was prefilled and decoded,
-    what waited) plus ``now_ms``, the simulated time the iteration ended.
+    and what still waited at its start, after its admission) plus ``now_ms``,
+    the simulated time the iteration ended.
     ``wall_time`` is the iteration's simulated duration in seconds, so it
     started at ``now_ms - 1000 * wall_time``; ``worker_id`` is the logical
     worker and ``dp_rank`` its attention-DP rank, and ``decode_worker_idx`` in

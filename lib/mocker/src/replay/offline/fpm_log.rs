@@ -4,7 +4,8 @@
 //! Per-iteration forward-pass log for offline aggregated replay: one JSON line
 //! per worker iteration, carrying the same fields a scaling policy sees in its
 //! tick snapshots (built by the same [`forward_pass_json`]), plus `now_ms`, the
-//! simulated time the iteration ended. `wall_time` is the iteration's simulated
+//! simulated time the iteration ended; the queued counts are the waiting queue at
+//! its start, after its admission. `wall_time` is the iteration's simulated
 //! duration in seconds, so it started at `now_ms - 1000 * wall_time`. With
 //! attention DP, a rank with no work in its group's step still completes with
 //! the group and logs a line with every count zero and the group's `wall_time`.
