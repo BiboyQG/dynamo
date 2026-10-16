@@ -103,10 +103,14 @@ def test_synthetic_replay_logs(tmp_path, turns_per_session):
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
-        ({"replay_mode": "online"}, "fpm_log only supports replay_mode='offline'"),
+        (
+            {"replay_mode": "online", "arrival_interval_ms": 5.0},
+            "fpm_log only supports replay_mode='offline'",
+        ),
         ({"replay_concurrency": 4}, "fpm_log does not support replay_concurrency"),
         (
             {
+                "arrival_interval_ms": 5.0,
                 "extra_engine_args": None,
                 "prefill_engine_args": engine_args(worker_type="prefill"),
                 "decode_engine_args": engine_args(worker_type="decode"),
@@ -122,7 +126,6 @@ def test_synthetic_rejected_combinations(tmp_path, kwargs, message):
             64,
             4,
             20,
-            arrival_interval_ms=5.0,
             fpm_log=tmp_path / "workers.jsonl",
             **kwargs,
         )
@@ -153,8 +156,8 @@ def test_disaggregated_replay_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="fpm_log only supports aggregated replay"):
         run_trace_replay(
             trace,
-            prefill_engine_args=engine_args(),
-            decode_engine_args=engine_args(),
+            prefill_engine_args=engine_args(worker_type="prefill"),
+            decode_engine_args=engine_args(worker_type="decode"),
             trace_block_size=TRACE_BLOCK_SIZE,
             fpm_log=tmp_path / "workers.jsonl",
         )
