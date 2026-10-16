@@ -103,10 +103,10 @@ def run_trace_replay(
     log, like a waiting policy, runs the multi-worker runtime: per-request
     records carry worker indices, the worker-seconds totals
     (``decode_worker_seconds``, ``gpu_hours``) can differ from the one-worker
-    report in the last digits (with ``max_sim_time_ms``, by the time from the
-    last completion to the last event at or before the cap, which only the
-    multi-worker runtime charges), and ``max_sim_time_ms`` stops at the first
-    event past the cap.
+    report in the last digits (with ``max_sim_time_ms`` by more: the one-worker
+    runtime charges to its last completion, which can lie past the cap, the
+    multi-worker runtime to the last event at or before the cap), and
+    ``max_sim_time_ms`` stops at the first event past the cap.
 
     ``wall_time_ms`` and derived throughput measure Rust runtime construction
     and execution. Planner creation and bootstrap happen before that boundary.
