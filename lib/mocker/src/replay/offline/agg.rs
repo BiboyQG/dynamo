@@ -35,7 +35,9 @@ use super::{
     },
     state::AggRequestState,
 };
-use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs, OutputSignal};
+use crate::common::protocols::{
+    DirectRequest, ForwardPassSnapshot, MockEngineArgs, OutputSignal, SchedulingPolicy,
+};
 use crate::loadgen::{ReplayRequestPayload, WorkloadDriver};
 #[cfg(test)]
 use crate::replay::ReplayRouterMode;
@@ -141,6 +143,9 @@ where
     collect_fpm: bool,
     /// Optional per-iteration log of every worker's forward-pass snapshot.
     fpm_log: Option<FpmLog>,
+    /// vLLM fails a prompt that reaches `max_model_len` in its input processor,
+    /// before the scheduler sees it; the driver rejects it at arrival likewise.
+    max_model_len: Option<usize>,
     #[cfg(test)]
     worker_active_requests: Vec<Vec<Uuid>>,
     #[cfg(test)]
@@ -229,6 +234,9 @@ where
             stats: AggRuntimeStats,
             fpm_buffer: LatestFpmBuffer::default(),
             traffic: TrafficAccumulator::new(),
+            max_model_len: args
+                .max_model_len
+                .filter(|_| args.scheduling_policy() == SchedulingPolicy::Vllm),
             max_sim_time_ms: None,
             scaling_policy: None,
             collect_fpm: false,
@@ -433,6 +441,16 @@ where
         self.collector
             .on_arrival(uuid, arrival_time_ms, input_length, output_length);
         self.traffic.on_arrival();
+        if self
+            .max_model_len
+            .is_some_and(|limit| input_length >= limit)
+        {
+            self.collector
+                .on_terminal(uuid, arrival_time_ms, ReplayTerminalStatus::Rejected);
+            CoreAdmissionSource::on_terminal(&mut self.admission, uuid, arrival_time_ms, true)?;
+            self.progress.inc_completed();
+            return Ok(uuid);
+        }
 
         let effects = self
             .placement
@@ -3517,6 +3535,66 @@ mod tests {
         let stats = rt.drain_traffic();
         assert_eq!(stats.num_req, 1);
         assert_eq!(stats.avg_osl, 1.0);
+    }
+
+    /// A prompt that reaches max_model_len is rejected when it arrives, as vLLM's
+    /// input processor does: no worker receives it, so no pass runs for it.
+    #[test]
+    fn oversize_prompt_is_rejected_at_arrival_agg() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(32)
+            .max_model_len(Some(8))
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let requests = VecDeque::from([
+            DirectRequest {
+                tokens: vec![1; 8],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(1)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(5.0),
+                ..Default::default()
+            },
+            DirectRequest {
+                tokens: vec![2; 4],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(2)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(5.0),
+                ..Default::default()
+            },
+        ]);
+        let mut rt = AggRuntime::new(
+            &args,
+            None,
+            None,
+            requests,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap()
+        .with_per_request_records(true);
+        assert!(rt.advance_to(1000.0).unwrap());
+        let records = rt.collector.per_request_records();
+        let rejected = records
+            .iter()
+            .find(|r| r.uuid == Uuid::from_u128(1).to_string())
+            .unwrap();
+        assert_eq!(rejected.terminal_status, ReplayTerminalStatus::Rejected);
+        assert_eq!(rejected.terminal_time_ms, 5.0);
+        assert!(rejected.first_admit_ms.is_none() && rejected.decode_worker_idx.is_none());
+        let completed = records
+            .iter()
+            .find(|r| r.uuid == Uuid::from_u128(2).to_string())
+            .unwrap();
+        assert_eq!(completed.terminal_status, ReplayTerminalStatus::Completed);
+        assert!(completed.first_admit_ms.is_some());
     }
 
     #[test]

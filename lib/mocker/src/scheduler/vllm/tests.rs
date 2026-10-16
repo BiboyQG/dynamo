@@ -4627,6 +4627,45 @@ mod fidelity {
         );
     }
 
+    /// A re-admitted request whose cache hit reaches beyond its prompt (into
+    /// the generated tokens it keeps) reports that whole hit as the KV already
+    /// present, not only the prompt part.
+    #[test]
+    fn resumed_kv_beyond_prompt_is_prefill_kv() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(10)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .preemption_mode(PreemptionMode::Lifo)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        core.receive(0.0, request(1, 0..8, 14));
+        core.receive(0.0, request(2, 100..106, 40));
+        let r2 = Uuid::from_u128(2);
+        let mut collector = TraceCollector::default();
+        let mut now = 0.0;
+        for _ in 0..40 {
+            let pass = core.execute_pass(&mut collector, now);
+            now = pass.end_ms.max(now + 1.0);
+            if let Some(a) = pass
+                .admissions
+                .iter()
+                .find(|a| a.uuid == r2 && a.reused_input_tokens > 6)
+            {
+                // The prompt is 6 tokens; the KV before the replay is the whole hit.
+                assert_eq!(a.reused_input_tokens, 16);
+                assert_eq!(pass.fpm.as_ref().unwrap().sum_prefill_kv_tokens, 16);
+                return;
+            }
+        }
+        panic!("no re-admission with a prefix beyond the prompt");
+    }
+
     #[test]
     fn oversize_prompt_is_rejected_before_it_queues() {
         let args = MockEngineArgs::builder()
@@ -4976,6 +5015,42 @@ mod waiting_policy {
                 .flat_map(admitted)
                 .any(|(_, reused)| reused > 0)
         );
+    }
+
+    /// The core drops a prompt that reaches max_model_len before the policy
+    /// is asked for an order, so no view ever shows it.
+    #[test]
+    fn policy_never_sees_an_oversize_prompt() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(6)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .max_model_len(Some(20))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = seen.clone();
+        install(&mut core, false, move |view| {
+            record
+                .lock()
+                .unwrap()
+                .extend(view.requests.iter().map(|r| r.prompt_tokens));
+            identity(view)
+        });
+        core.receive(0.0, request(1, 0..16, 4));
+        core.receive(0.0, request(2, 100..112, 1));
+        core.receive(0.0, request(3, 200..220, 1));
+        core.receive(0.0, request(4, 300..304, 1));
+        let mut collector = TraceCollector::default();
+        core.execute_pass(&mut collector, 0.0);
+        let seen = seen.lock().unwrap().clone();
+        assert!(!seen.is_empty());
+        assert!(seen.iter().all(|&p| p < 20), "policy saw {seen:?}");
     }
 
     #[test]

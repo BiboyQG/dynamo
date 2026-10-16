@@ -126,8 +126,8 @@ struct ScheduledWork {
     /// `max(prompt_len, known_len - 1)` still to compute, so a resumed request
     /// replaying its generated tokens is prefill until its last known token.
     prefill: bool,
-    /// Tokens already in KV before this pass's work: the cached prefix of a
-    /// new request, or everything computed so far of a resumed one.
+    /// Tokens already in KV before this pass's work: the cached prefix on an
+    /// admission (new or resumed), everything computed so far on a later chunk.
     prefix_tokens: usize,
     terminal_after_schedule: bool,
     /// Full prompt length, captured at schedule time for FPM variance calculation.
@@ -1993,8 +1993,11 @@ impl VllmCore {
         scheduled: &FxHashMap<Uuid, ScheduledWork>,
         wall_time_secs: f64,
     ) -> ForwardPassSnapshot {
-        // Matches Dynamo's forward-pass metrics under vLLM's V2 model runner,
-        // where a resumed request counts as a prefill on the pass that replays it.
+        // The prefill/decode split follows the position rule in schedule_request.
+        // Dynamo's forward-pass metrics label a resumed request a prefill only on
+        // the pass that re-admits it (its later chunks count as decodes) and a
+        // re-admission with only its last token uncached a one-token prefill, so
+        // the labels differ from Dynamo's in those two cases; the timing does not.
         let scheduled_prefills = scheduled.values().filter_map(|work| {
             work.prefill.then_some((
                 work.prompt_len as u64,
