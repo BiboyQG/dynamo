@@ -87,8 +87,10 @@ def run_trace_replay(
     ``waiting_policy_log`` writes one JSON line per policy call: the per-pass
     ``ctx`` fields, the waiting requests as the policy saw them (every field,
     native order) and the order it chose (``submit_seq``); the engine-argument
-    ``ctx`` fields are not written; see ``ScoreOrder``. The log file is opened
-    before the replay starts, so a rejected call still truncates it.
+    ``ctx`` fields are not written; see ``ScoreOrder``. The log is opened once
+    the policy has loaded, before the replay starts, so a call the binding or
+    the scheduler rejects still truncates it; a policy that fails to load leaves
+    it untouched.
     ``fpm_log`` writes one JSON line per worker iteration: the forward-pass
     snapshot a scaling policy sees per tick (what was prefilled and decoded,
     what waited) plus ``now_ms``, the simulated time the iteration ended.

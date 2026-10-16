@@ -12,10 +12,12 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
 from dynamo._core import run_mocker_trace_replay
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
@@ -49,6 +51,17 @@ REQUEST_KEYS = {
     "num_preemptions",
 }
 PREFIX_KEYS = REQUEST_KEYS | {"cached_prefix_tokens", "needed_blocks"}
+CTX_KEYS = {
+    "now_ms",
+    "worker_id",
+    "worker_role",
+    "num_running",
+    "max_num_seqs",
+    "waiting_len",
+    "block_size",
+    "num_gpu_blocks",
+    "free_blocks",
+}
 # Replay wall time and what is derived from it differ run to run.
 WALL_TIME_KEYS = (
     "wall_time_ms",
@@ -177,6 +190,9 @@ def test_fcfs_matches_native_order(
     )
     assert fcfs[0]["waiting_policy_stats"]["calls"] > 0
     rows = lines(log)
+    assert fcfs[0]["waiting_policy_stats"]["max_waiting_len"] == max(
+        line["waiting_len"] for line in rows
+    )
     assert {line["worker_id"] for line in rows} == set(range(num_workers))
     # Each line is the view the policy saw and the order it chose.
     for line in rows:
@@ -267,6 +283,34 @@ def test_score_order_contract():
     assert order_of([10**18 + 7, 10**18 + 5], [1, 2]) == [1, 0]
     with pytest.raises(TypeError, match="score must return a number"):
         order_of([True, 0.0], [1, 2])
+    # The log write is outside the timed part.
+    slow_log = SimpleNamespace(write=lambda text: time.sleep(0.05))
+    module = SimpleNamespace(uses_prefix_hits=False, score=lambda r, ctx: 0.0)
+    scorer = ScoreOrder(module, decision_log=slow_log)
+    ctx = {
+        "now_ms": 0.0,
+        "worker_id": 0,
+        "num_running": 0,
+        "waiting_len": 1,
+        "free_blocks": 0,
+    }
+    scorer.order({**ctx, "requests": [{"submit_seq": 1}]})
+    assert scorer.stats["seconds"] < 0.05
+
+
+def test_load_registers_the_module_so_dataclasses_resolve_annotations(tmp_path):
+    policy = tmp_path / "typed.py"
+    policy.write_text(
+        "from __future__ import annotations\n"
+        "from dataclasses import dataclass\n"
+        "@dataclass\n"
+        "class Weights:\n"
+        "    prompt: float\n"
+        "W = Weights(prompt=2.0)\n"
+        "def score(request, ctx):\n"
+        "    return W.prompt * request['prompt_tokens']\n"
+    )
+    assert load(policy).score({"prompt_tokens": 3}, {}) == 6.0
 
 
 SUBPROCESS = """
@@ -460,15 +504,52 @@ def test_log_carries_prefix_fields_and_the_policy_order(trace, tmp_path):
         assert key == sorted(key)
 
 
+@pytest.mark.parametrize("name", ["sjf", "spf", "hrrn"])
+def test_baselines_order_by_their_documented_keys(trace, tmp_path, name):
+    # The key each docstring states, recomputed from the logged view; this trace
+    # never preempts, so sjf's and spf's preempted-first clause does not come into play.
+    def key(r):
+        known = r["prompt_tokens"] + r["generated_tokens"]
+        if name == "sjf":
+            return float(r["prompt_tokens"])
+        if name == "spf":
+            return float(known - r["cached_prefix_tokens"])
+        service = max(known - r["cached_prefix_tokens"], 1)
+        return -(r["age_tokens"] + service) / service
+
+    log = tmp_path / "decisions.jsonl"
+    replay(
+        trace,
+        tmp_path,
+        name,
+        waiting_policy=POLICIES / f"{name}.py",
+        waiting_policy_log=log,
+    )
+    rows = lines(log)
+    assert rows
+    distinct = 0
+    for line in rows:
+        assert all(r["num_preemptions"] == 0 for r in line["requests"])
+        by_seq = {r["submit_seq"]: r for r in line["requests"]}
+        assert sorted(line["order"]) == sorted(by_seq)
+        keys = [(key(by_seq[seq]), seq) for seq in line["order"]]
+        assert keys == sorted(keys)
+        distinct = max(distinct, len({k for k, _ in keys}))
+    assert distinct > 1
+
+
 def test_log_shows_the_requests_before_the_policy_touched_them(trace, tmp_path):
     policy = tmp_path / "mutating.py"
     policy.write_text(
         "def score(request, ctx):\n"
+        f"    assert set(ctx) == {CTX_KEYS!r}\n"
         "    request['prompt_tokens'] = -1\n"
         "    ctx['now_ms'] = -1.0\n"
         "    return float(request['queue_index'])\n"
     )
     log = tmp_path / "decisions.jsonl"
+    # A reused log path is truncated.
+    log.write_text("stale\n")
     replay(trace, tmp_path, "mutating", waiting_policy=policy, waiting_policy_log=log)
     rows = lines(log)
     assert rows
