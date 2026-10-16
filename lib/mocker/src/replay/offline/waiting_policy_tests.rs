@@ -190,24 +190,28 @@ pub(super) fn sessions(n: usize) -> Trace {
     }
 }
 
-/// `burst(n)` as a single-turn Mooncake trace file (trace block size 4).
-pub(super) fn mooncake_file(n: usize) -> NamedTempFile {
+/// `burst(n)` as a Mooncake trace file (trace block size 4), one session per
+/// request; with `turns == 2` a second turn, one block longer, follows at once.
+pub(super) fn mooncake_file(n: usize, turns: usize) -> NamedTempFile {
     let mut file = NamedTempFile::new().unwrap();
     for i in 0..n {
         let family = (i % 3) as u64 * 100;
-        let input_length = 8 + 4 * (i % 4);
-        let hash_ids: Vec<u64> = (0..input_length / 4).map(|b| family + b as u64).collect();
-        writeln!(
-            file,
-            "{}",
-            serde_json::json!({
-                "timestamp": i as f64,
+        for turn in 0..turns {
+            let input_length = 8 + 4 * (i % 4) + 4 * turn;
+            let hash_ids: Vec<u64> = (0..input_length / 4).map(|b| family + b as u64).collect();
+            let mut row = serde_json::json!({
+                "session_id": format!("session-{i}"),
                 "input_length": input_length,
                 "output_length": 3,
                 "hash_ids": hash_ids,
-            })
-        )
-        .unwrap();
+            });
+            if turn == 0 {
+                row["timestamp"] = serde_json::json!(i as f64);
+            } else {
+                row["delay"] = serde_json::json!(0.0);
+            }
+            writeln!(file, "{row}").unwrap();
+        }
     }
     file
 }
@@ -345,18 +349,21 @@ fn identity_policy_matches_native_order_on_four_kv_router_workers() {
 
 #[test]
 fn worker_added_by_scaling_gets_the_policy() {
+    // With attention DP the added worker brings two schedulers, keys 2 and 3.
+    let mut args = vllm_args();
+    args.dp_size = 2;
     let (policy, workers_seen) = identity_policy();
     let report = replay(
-        vllm_args(),
+        args,
         1,
         ReplayRouterMode::RoundRobin,
-        burst(24),
+        burst(48),
         Some(Box::new(AddOneWorker)),
         Some(policy),
     )
     .unwrap();
-    assert_eq!(report.request_counts.completed_requests, 24);
-    assert_eq!(*workers_seen.lock().unwrap(), BTreeSet::from([0, 1]));
+    assert_eq!(report.request_counts.completed_requests, 48);
+    assert_eq!(*workers_seen.lock().unwrap(), BTreeSet::from([0, 1, 2, 3]));
 }
 
 #[test]
@@ -466,36 +473,39 @@ fn workload_entrypoint_consults_the_policy() {
 
 #[test]
 fn trace_file_entrypoint_consults_the_policy() {
-    // The bindings' path for a Mooncake trace file.
-    let file = mooncake_file(24);
-    let run = |waiting_policy| {
-        crate::replay::simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
-            vllm_args(),
-            None,
-            None,
-            file.path(),
-            4,
-            2,
-            1.0,
-            ReplayRouterMode::RoundRobin,
-            TraceFileFormat::Mooncake,
-            0.0,
-            0,
-            true,
-            None,
-            SlaThresholds::default(),
-            None,
-            waiting_policy,
-            None,
-        )
-        .unwrap()
-    };
-    let (policy, workers_seen) = identity_policy();
-    let native = run(None);
-    let ordered = run(Some(policy));
-    assert_eq!(native.request_counts.completed_requests, 24);
-    assert_eq!(comparable(&native), comparable(&ordered));
-    assert_eq!(*workers_seen.lock().unwrap(), BTreeSet::from([0, 1]));
+    // The bindings' path for a Mooncake trace file; a two-turn file takes the
+    // entrypoint's multi-turn branch.
+    for turns in [1, 2] {
+        let file = mooncake_file(24, turns);
+        let run = |waiting_policy| {
+            crate::replay::simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
+                vllm_args(),
+                None,
+                None,
+                file.path(),
+                4,
+                2,
+                1.0,
+                ReplayRouterMode::RoundRobin,
+                TraceFileFormat::Mooncake,
+                0.0,
+                0,
+                true,
+                None,
+                SlaThresholds::default(),
+                None,
+                waiting_policy,
+                None,
+            )
+            .unwrap()
+        };
+        let (policy, workers_seen) = identity_policy();
+        let native = run(None);
+        let ordered = run(Some(policy));
+        assert_eq!(native.request_counts.completed_requests, 24 * turns);
+        assert_eq!(comparable(&native), comparable(&ordered));
+        assert_eq!(*workers_seen.lock().unwrap(), BTreeSet::from([0, 1]));
+    }
 }
 
 /// Placement ties are random without replay-bench, so only the install is
