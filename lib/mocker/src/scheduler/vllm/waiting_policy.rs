@@ -26,7 +26,8 @@ pub struct WaitingRequestView {
     pub submit_seq: u64,
     /// Virtual time since the request reached this worker; not reset by preemption.
     pub wait_ms: f64,
-    /// Tokens this scheduler has processed since the request first waited here.
+    /// Tokens of the passes this scheduler started since the request reached its
+    /// queue; the pass running at arrival counts toward `wait_ms`, not here.
     pub age_tokens: u64,
     pub prompt_tokens: usize,
     /// Generated tokens kept across a preemption; zero for new requests.

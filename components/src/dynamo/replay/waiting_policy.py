@@ -29,8 +29,9 @@ wait, and, for a prefix-aware policy, when more than 128 wait.
   keeps it.
 - ``wait_ms``: virtual time since the request reached this worker's queue; a
   preemption does not reset it.
-- ``age_tokens``: tokens this scheduler processed since the request first
-  waited here.
+- ``age_tokens``: tokens of the passes this scheduler started since the
+  request reached its queue; the pass running at arrival counts toward
+  ``wait_ms`` but not here. A preemption does not reset it.
 - ``prompt_tokens``: prompt length.
 - ``generated_tokens``: tokens generated before a preemption; 0 for a new
   request.

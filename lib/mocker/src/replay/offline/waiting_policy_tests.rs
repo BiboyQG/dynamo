@@ -212,6 +212,49 @@ pub(super) fn mooncake_file(n: usize) -> NamedTempFile {
     file
 }
 
+/// Records (submit_seq, now_ms, wait_ms) of every request it is shown.
+struct RecordWaits(Arc<Mutex<Vec<(u64, f64, f64)>>>);
+
+impl WaitingQueuePolicy for RecordWaits {
+    fn uses_prefix_hits(&self) -> bool {
+        false
+    }
+
+    fn order(&mut self, view: &WaitingQueueView) -> anyhow::Result<Vec<usize>> {
+        let mut rows = self.0.lock().unwrap();
+        for request in &view.requests {
+            rows.push((request.submit_seq, view.now_ms, request.wait_ms));
+        }
+        Ok((0..view.requests.len()).collect())
+    }
+}
+
+/// The driver passes the arrival time into receive: burst(n) arrives one
+/// millisecond apart on one worker, so wait_ms is now_ms minus (submit_seq - 1).
+#[test]
+fn wait_ms_counts_from_the_arrival_the_driver_passes_in() {
+    let rows = Arc::new(Mutex::new(Vec::new()));
+    let policy: WaitingPolicyHandle = Arc::new(Mutex::new(RecordWaits(Arc::clone(&rows))));
+    replay(
+        vllm_args(),
+        1,
+        ReplayRouterMode::RoundRobin,
+        burst(12),
+        None,
+        Some(policy),
+    )
+    .unwrap();
+    let rows = rows.lock().unwrap();
+    assert!(!rows.is_empty());
+    for &(submit_seq, now_ms, wait_ms) in rows.iter() {
+        assert_eq!(
+            wait_ms,
+            now_ms - (submit_seq as f64 - 1.0),
+            "submit_seq {submit_seq} at {now_ms} ms"
+        );
+    }
+}
+
 #[test]
 fn identity_policy_matches_native_order_on_one_worker() {
     // A policy keeps one worker on the multi-worker runtime, so the native
