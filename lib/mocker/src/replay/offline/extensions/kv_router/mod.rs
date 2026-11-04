@@ -159,6 +159,8 @@ impl SyncReplayIndexer {
 }
 
 struct PendingRequest {
+    request_seq: u64,
+    arrival_ms: f64,
     uuid: Uuid,
     token_seq: Option<Vec<SequenceHash>>,
     isl_tokens: usize,
@@ -223,6 +225,12 @@ impl PendingRequest {
 }
 
 pub(crate) struct OfflineReplayRouter {
+    routing_policy: Option<crate::replay::RoutingPolicyHandle>,
+    routing_sla: crate::replay::SlaThresholds,
+    routing_args: MockEngineArgs,
+    request_seq: u64,
+    route_seq: u64,
+    routing_rng: fastrand::Rng,
     config: KvRouterConfig,
     block_size: u32,
     dp_size: u32,
@@ -427,6 +435,12 @@ impl OfflineReplayRouter {
             .map_err(anyhow::Error::from)?;
 
         Ok(Self {
+            routing_policy: None,
+            routing_sla: crate::replay::SlaThresholds::default(),
+            routing_args: args.clone(),
+            request_seq: 0,
+            route_seq: 0,
+            routing_rng: fastrand::Rng::with_seed(0xD1A0_5EED),
             config,
             block_size: args.block_size as u32,
             dp_size: args.dp_size.max(1),
@@ -481,8 +495,11 @@ impl OfflineReplayRouter {
         session_id: Option<String>,
         now_ms: f64,
     ) -> Result<RouterEffects> {
-        let pending =
+        let mut pending =
             self.build_pending_request(request, max_output_tokens, replay_hashes, session_id)?;
+        pending.arrival_ms = now_ms;
+        pending.request_seq = self.request_seq;
+        self.request_seq += 1;
         let decay_now = self.decay_now(now_ms);
         let (class_index, snapshot) = match self
             .profile
@@ -757,6 +774,8 @@ impl OfflineReplayRouter {
         };
 
         Ok(PendingRequest {
+            request_seq: 0,
+            arrival_ms: 0.0,
             uuid,
             token_seq,
             isl_tokens: input_length,
@@ -788,7 +807,92 @@ impl OfflineReplayRouter {
         let worker_loads = self
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
-        let scheduling_request = request.scheduling_request(self.block_size as usize, worker_loads);
+        let mut scheduling_request =
+            request.scheduling_request(self.block_size as usize, worker_loads);
+        let mut routed = None;
+        if let Some(policy) = self.routing_policy.clone() {
+            use crate::replay::{RoutingRequestView, RoutingView, RoutingWorkerView};
+            let prefix = policy.lock().unwrap().uses_prefix_hits();
+            let mut candidates = Vec::new();
+            scheduling_request
+                .eligibility()
+                .for_each_eligible_worker_rank(&self.workers_with_configs, |worker, _| {
+                    candidates.push(worker)
+                });
+            candidates.sort_unstable_by_key(|worker| (worker.worker_id, worker.dp_rank));
+            anyhow::ensure!(
+                !candidates.is_empty(),
+                "routing_policy has no eligible workers"
+            );
+            let workers = candidates
+                .iter()
+                .map(|&worker| {
+                    let load = scheduling_request.worker_load_for(worker);
+                    let cached = request.overlaps.scores.get(&worker).copied().unwrap_or(0)
+                        as usize
+                        * self.block_size as usize;
+                    RoutingWorkerView {
+                        worker_id: worker.worker_id,
+                        dp_rank: worker.dp_rank,
+                        worker_role: "aggregated",
+                        active_requests: load.active_requests,
+                        active_prefill_tokens: load.active_prefill_tokens,
+                        active_decode_blocks: load.active_decode_blocks,
+                        potential_decode_blocks: load.potential_decode_blocks(),
+                        cached_prefix_tokens: prefix.then_some(cached),
+                        potential_prefill_tokens: prefix.then_some(
+                            load.active_prefill_tokens + request.isl_tokens.saturating_sub(cached),
+                        ),
+                    }
+                })
+                .collect();
+            let view = RoutingView {
+                now_ms: decay_now
+                    .duration_since(self.decay_time_epoch)
+                    .as_secs_f64()
+                    * 1000.0,
+                route_seq: self.route_seq,
+                num_workers: self.workers_with_configs.len(),
+                workers,
+                request: RoutingRequestView {
+                    request_seq: request.request_seq,
+                    arrival_ms: request.arrival_ms,
+                    prompt_tokens: request.isl_tokens,
+                },
+                block_size: self.block_size as usize,
+                max_num_seqs: self.routing_args.max_num_seqs,
+                max_num_batched_tokens: self.routing_args.max_num_batched_tokens,
+                num_gpu_blocks: self.routing_args.num_gpu_blocks,
+                sla_ttft_ms: self.routing_sla.ttft_ms,
+                sla_itl_ms: self.routing_sla.itl_ms,
+                sla_e2e_ms: self.routing_sla.e2e_ms,
+            };
+            let scores = policy.lock().unwrap().scores(&view)?;
+            anyhow::ensure!(
+                scores.len() == candidates.len(),
+                "routing_policy score count differs from workers"
+            );
+            // Same seeded reservoir tie rule as native replay-bench selection.
+            let mut best = None;
+            let mut minimum = f64::INFINITY;
+            let mut ties = 0;
+            for (index, &value) in scores.iter().enumerate() {
+                let value = if value.is_nan() { f64::INFINITY } else { value };
+                if value < minimum {
+                    best = Some(index);
+                    minimum = value;
+                    ties = 1;
+                } else if value == minimum {
+                    ties += 1;
+                    if self.routing_rng.usize(0..ties) == 0 {
+                        best = Some(index);
+                    }
+                }
+            }
+            let chosen = best.ok_or_else(|| anyhow!("routing_policy did not select a worker"))?;
+            scheduling_request.pinned_worker = Some(candidates[chosen]);
+            routed = Some((policy, view, chosen));
+        }
         let eligibility = scheduling_request.eligibility();
         let selection = self.selector.select_worker(
             &self.workers_with_configs,
@@ -830,6 +934,10 @@ impl OfflineReplayRouter {
             )
             .map_err(anyhow::Error::from)?;
 
+        if let Some((policy, view, chosen)) = routed {
+            policy.lock().unwrap().on_route(&view, chosen)?;
+            self.route_seq += 1;
+        }
         Ok(AdmitOutcome {
             worker_idx,
             overlap_blocks,

@@ -10,6 +10,7 @@ from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
+from dynamo.replay.routing_policy import ScoreWorkers
 from dynamo.replay.waiting_policy import ScoreOrder
 from dynamo.replay.waiting_policy import load as _load_waiting_policy
 
@@ -76,6 +77,8 @@ def run_trace_replay(
     waiting_policy=None,
     waiting_policy_log=None,
     fpm_log=None,
+    routing_policy=None,
+    routing_policy_log=None,
 ):
     """Run trace replay.
 
@@ -111,9 +114,23 @@ def run_trace_replay(
     multi-worker runtime to the last event at or before the cap), and
     ``max_sim_time_ms`` stops at the first event past the cap.
 
+    ``routing_policy`` is a Python module/path with ``score(worker, ctx)`` and
+    optional ``on_route(worker, ctx)``. It replaces worker selection, using KV
+    placement for tracking. Fixed-worker offline aggregated Mooncake replay,
+    DP=1, without router queues, planner, concurrency or aic_perf_config only.
+    ``routing_policy_log`` records pre-assignment snapshots, scores and destination.
+    A path loads fresh module state per replay; a supplied module retains its state.
+
     ``wall_time_ms`` and derived throughput measure Rust runtime construction
     and execution. Planner creation and bootstrap happen before that boundary.
     """
+    if routing_policy_log is not None and routing_policy is None:
+        raise ValueError("routing_policy_log needs routing_policy")
+    if routing_policy is not None:
+        if planner_config is not None:
+            raise ValueError("routing_policy does not support planner_config")
+        # Custom scoring uses KV placement's observations and lifecycle accounting.
+        router_mode = "kv_router"
     trace_files = _normalize_trace_files(trace_files)
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
@@ -168,6 +185,12 @@ def run_trace_replay(
             )
     with ExitStack() as stack:
         waiting = _waiting_policy_adapter(stack, waiting_policy, waiting_policy_log)
+        routing = None
+        if routing_policy is not None:
+            log = None
+            if routing_policy_log is not None:
+                log = stack.enter_context(open(routing_policy_log, "w", encoding="utf-8"))
+            routing = ScoreWorkers(routing_policy, log)
         adapter = None
         if planner_config is not None:
             from dynamo.replay.main import _planner_replay_adapter
@@ -186,7 +209,10 @@ def run_trace_replay(
             **replay_kwargs,
             scaling_policy=adapter,
             waiting_policy=waiting,
+            **({"routing_policy": routing} if routing is not None else {}),
         )
+        if routing is not None:
+            trace_report["routing_policy_stats"] = routing.stats
         if waiting is not None:
             trace_report["waiting_policy_stats"] = waiting.stats
         if adapter is not None:

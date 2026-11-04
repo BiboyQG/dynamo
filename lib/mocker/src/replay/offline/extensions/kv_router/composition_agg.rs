@@ -330,3 +330,21 @@ where
         })
     }
 }
+
+impl AggRuntimeImpl<KvRouterPlacement, RouterEventObservation, KvReplayMetadata> {
+    pub(in crate::replay::offline) fn new_routing_source(
+        args: &MockEngineArgs,
+        router_config: Option<ReplayKvRouterConfig>,
+        admission: AdmissionQueue<KvReplayMetadata>,
+        num_workers: usize,
+        policy: crate::replay::RoutingPolicyHandle,
+        sla: crate::replay::SlaThresholds,
+    ) -> Result<Self> {
+        Self::new_composed(args, admission, num_workers, |args, _topology| {
+            let mut placement = KvRouterPlacement::new(args, router_config, None, num_workers)?;
+            placement.router.routing_policy = Some(policy);
+            placement.router.routing_sla = sla;
+            Ok(placement)
+        })
+    }
+}

@@ -18,7 +18,6 @@ pub(crate) mod scaling;
 pub(crate) mod single;
 pub(crate) mod state;
 
-pub use entrypoints::run_offline_handoff_conformance;
 pub(crate) use entrypoints::{
     generate_trace_worker_artifacts, generate_trace_worker_artifacts_with_visibility,
     simulate_agentic_trace_workload, simulate_concurrency_disagg_with_scaling_policy,
@@ -29,6 +28,7 @@ pub(crate) use entrypoints::{
     simulate_trace_workload_disagg_with_scaling_policy,
     simulate_trace_workload_with_scaling_policy,
 };
+pub use entrypoints::{run_offline_handoff_conformance, simulate_trace_file_with_routing_policy};
 pub use fpm_log::forward_pass_json;
 
 #[cfg(test)]

@@ -25,6 +25,7 @@ zmq-events = ["dep:tmq"]
 kvbm-offload = ["dep:kvbm-engine", "dep:kvbm-physical", "dep:kvbm-common", "dep:velo"]
 
 [dependencies]
+fastrand = "2"
 # repo
 dynamo-data-gen = { workspace = true }
 dynamo-kv-router = { workspace = true }
