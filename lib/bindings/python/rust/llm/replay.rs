@@ -886,7 +886,7 @@ impl MockEngineArgs {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, scaling_policy=None, waiting_policy=None, fpm_log=None))]
+#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, scaling_policy=None, waiting_policy=None, fpm_log=None, routing_policy=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -916,6 +916,7 @@ pub fn run_mocker_trace_replay(
     scaling_policy: Option<Py<PyAny>>,
     waiting_policy: Option<Py<PyAny>>,
     fpm_log: Option<PathBuf>,
+    routing_policy: Option<Py<PyAny>>,
 ) -> PyResult<PyObject> {
     let args_selection = load_replay_args_selection(
         py,
@@ -928,6 +929,20 @@ pub fn run_mocker_trace_replay(
     )?;
     let router_mode = parse_replay_router_mode(router_mode)?;
     let trace_format = parse_trace_file_format(trace_format)?;
+    if routing_policy.is_some() {
+        if replay_mode != "offline"
+            || replay_concurrency.is_some()
+            || trace_format != dynamo_mocker::loadgen::TraceFileFormat::Mooncake
+            || matches!(args_selection, ReplayArgsSelection::Disagg(_))
+            || router_mode != dynamo_mocker::replay::ReplayRouterMode::KvRouter
+            || scaling_policy.is_some()
+            || aic_perf_config.is_some()
+        {
+            return Err(PyValueError::new_err(
+                "routing_policy requires fixed-worker offline aggregated Mooncake replay with router_mode='kv_router', without concurrency, scaling or aic_perf_config",
+            ));
+        }
+    }
     if waiting_policy.is_some() {
         if replay_mode != "offline" {
             return Err(PyValueError::new_err(
@@ -1008,6 +1023,10 @@ pub fn run_mocker_trace_replay(
         itl_ms: sla_itl_ms,
         e2e_ms: sla_e2e_ms,
     };
+    let has_routing_policy = routing_policy.is_some();
+    let routing_policy = routing_policy
+        .map(|callback| PyReplayRoutingPolicy::handle(py, callback))
+        .transpose()?;
     let run = move |mut scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
                     mut waiting_policy: Option<WaitingPolicyHandle>| {
         let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
@@ -1062,6 +1081,12 @@ pub fn run_mocker_trace_replay(
                 )
             }
             ReplayDispatch::AggregatedOffline(args) => {
+                if let Some(policy) = routing_policy {
+                    return dynamo_mocker::replay::simulate_trace_file_with_routing_policy(
+                        *args, router_config.clone(), trace_file, trace_block_size,
+                        num_workers, arrival_speedup_ratio, record_per_request, max_sim_time_ms,
+                        sla, waiting_policy.take(), policy, fpm_log.clone());
+                }
                 dynamo_mocker::replay::simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
                     *args,
                     router_config.clone(),
@@ -1157,7 +1182,7 @@ pub fn run_mocker_trace_replay(
     let waiting_policy = waiting_policy
         .map(|callback| PyWaitingQueuePolicy::handle(py, callback))
         .transpose()?;
-    let report = if scaling_policy.is_none() && waiting_policy.is_none() {
+    let report = if scaling_policy.is_none() && waiting_policy.is_none() && !has_routing_policy {
         py.allow_threads(move || run(None, None))
             .map_err(to_pyerr)?
     } else {
@@ -2542,6 +2567,54 @@ impl ReplayScalingPolicy for PyReplayScalingPolicy {
                 target_decode: decision.get_item("target_decode")?.extract()?,
                 next_tick_ms: decision.get_item("next_tick_ms")?.extract()?,
             })
+        })
+        .map_err(anyhow::Error::new)
+    }
+}
+
+struct PyReplayRoutingPolicy {
+    callback: Py<PyAny>,
+    uses_prefix_hits: bool,
+}
+
+impl PyReplayRoutingPolicy {
+    fn handle(
+        py: Python<'_>,
+        callback: Py<PyAny>,
+    ) -> PyResult<dynamo_mocker::replay::RoutingPolicyHandle> {
+        let uses_prefix_hits = callback.bind(py).getattr("uses_prefix_hits")?.extract()?;
+        Ok(Arc::new(Mutex::new(Self {
+            callback,
+            uses_prefix_hits,
+        })))
+    }
+}
+
+impl dynamo_mocker::replay::ReplayRoutingPolicy for PyReplayRoutingPolicy {
+    fn uses_prefix_hits(&self) -> bool {
+        self.uses_prefix_hits
+    }
+    fn scores(&mut self, view: &dynamo_mocker::replay::RoutingView) -> anyhow::Result<Vec<f64>> {
+        Python::with_gil(|py| {
+            let view = pythonize(py, view).map_err(to_pyerr)?;
+            self.callback
+                .bind(py)
+                .call_method1("scores", (view,))?
+                .extract()
+        })
+        .map_err(anyhow::Error::new)
+    }
+    fn on_route(
+        &mut self,
+        view: &dynamo_mocker::replay::RoutingView,
+        index: usize,
+    ) -> anyhow::Result<()> {
+        Python::with_gil(|py| -> PyResult<()> {
+            let view = pythonize(py, view).map_err(to_pyerr)?;
+            self.callback
+                .bind(py)
+                .call_method1("committed", (view, index))?;
+            Ok(())
         })
         .map_err(anyhow::Error::new)
     }

@@ -7,6 +7,11 @@ mod entrypoints;
 pub(crate) mod offline;
 mod online;
 mod router_shared;
+mod routing_policy;
+pub use offline::simulate_trace_file_with_routing_policy;
+pub use routing_policy::{
+    ReplayRoutingPolicy, RoutingPolicyHandle, RoutingRequestView, RoutingView, RoutingWorkerView,
+};
 mod validate;
 
 use std::collections::VecDeque;

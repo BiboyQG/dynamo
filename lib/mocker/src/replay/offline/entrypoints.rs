@@ -2085,3 +2085,81 @@ mod tests {
         assert!(artifacts.output_signals.last().unwrap().signal.completed);
     }
 }
+
+/// Custom worker scoring for fixed-worker, aggregated standard Mooncake replay.
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_trace_file_with_routing_policy(
+    args: MockEngineArgs,
+    router_config: Option<ReplayKvRouterConfig>,
+    trace_path: &std::path::Path,
+    trace_block_size: usize,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+    waiting_policy: Option<WaitingPolicyHandle>,
+    routing_policy: crate::replay::RoutingPolicyHandle,
+    fpm_log: Option<PathBuf>,
+) -> Result<TraceSimulationReport> {
+    let started_at = Instant::now();
+    let args = args.normalized()?;
+    crate::replay::validate::validate_offline_replay_args(
+        &args,
+        num_workers,
+        ReplayRouterMode::KvRouter,
+        true,
+    )?;
+    anyhow::ensure!(
+        args.dp_size == 1,
+        "routing_policy currently supports dp_size=1 only"
+    );
+    let config = router_config.unwrap_or_default();
+    anyhow::ensure!(
+        !config.router_track_output_blocks,
+        "routing_policy cannot use trace-derived future output hints for load tracking"
+    );
+    anyhow::ensure!(
+        config.router_track_active_blocks && config.router_track_prefill_tokens,
+        "routing_policy requires active-block and prefill-token tracking"
+    );
+    anyhow::ensure!(
+        config.router_queue_threshold.is_none()
+            && config.router_policy_config.is_none()
+            && args.router_queue_policy.is_none(),
+        "routing_policy requires immediate router dispatch (no router queue policies)"
+    );
+    let trace = Trace::from_mooncake(trace_path, trace_block_size)?
+        .normalize_session_starts()?
+        .speed_up_timing(arrival_speedup_ratio)?;
+    let admission = if trace.is_single_turn() {
+        trace.validate_for_trace_mode()?;
+        super::components::AdmissionQueue::new_requests(
+            normalize_trace_requests(trace.to_single_turn_requests()?, 1.0)?,
+            AggReplayMode::Trace,
+        )
+    } else {
+        super::components::AdmissionQueue::new_workload(
+            trace_workload_driver(trace, args.block_size, ReplayRouterMode::KvRouter, false)?,
+            AggReplayMode::Trace,
+        )
+    };
+    let runtime = super::agg::AggRuntimeImpl::<
+        super::extensions::kv_router::KvRouterPlacement,
+        super::extensions::kv_events::RouterEventObservation,
+        super::components::KvReplayMetadata,
+    >::new_routing_source(
+        &args,
+        Some(config),
+        admission,
+        num_workers,
+        routing_policy,
+        sla,
+    )?
+    .with_per_request_records(record_per_request)
+    .with_max_sim_time_ms(max_sim_time_ms)
+    .with_waiting_policy(waiting_policy)?
+    .with_fpm_log(fpm_log.as_deref())?;
+    let collector = runtime.run()?.0;
+    Ok(finish_with_replay_wall_time(collector, started_at, sla))
+}

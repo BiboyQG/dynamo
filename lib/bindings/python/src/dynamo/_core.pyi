@@ -2608,6 +2608,7 @@ def run_mocker_trace_replay(
     scaling_policy: Optional[Any] = None,
     waiting_policy: Optional[Any] = None,
     fpm_log: Optional[str | os.PathLike[str]] = None,
+    routing_policy: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
